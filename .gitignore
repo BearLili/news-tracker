@@ -1,0 +1,9 @@
+/target
+.claude
+.idea
+.env
+node_modules
+/logs
+ecosystem.config.*
+/bot-*
+/data
