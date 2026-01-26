@@ -13,7 +13,7 @@ const collectors = [
   // new CDCMeaslesCollector(),  // 独立运行麻疹
   // new WeatherMonitorCollector(), // NOAA + OpenMeteo (高频监控)
   new WunderRealtimeCollector(), 
-  new WunderHistoryCollector(),
+  // new WunderHistoryCollector(),
 ];
 
 async function main() {
