@@ -5,10 +5,12 @@ import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import Redis from 'ioredis';
+import pLimit from 'p-limit';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
+// 初始化 Redis 客户端
 const redis = new Redis({
   host: '127.0.0.1',
   port: 6379,
@@ -17,37 +19,48 @@ const redis = new Redis({
 
 class WunderRealtimeCollector extends BaseCollector {
   constructor() {
-    // 1. 刷新频率改为 20s
+    // 设置 20s 刷新频率
     super('wunder_realtime_monitor', 20 * 1000);
     this.browser = null;
     this.cities = [];
     this.lastRestartTime = Date.now();
     this.RESTART_INTERVAL = 10 * 60 * 1000; // 10分钟重启阈值
+    this.isBrowserInitializing = false;    // 防止并发初始化冲突
   }
 
   /**
-   * 核心优化：浏览器常驻，带自动重启机制
+   * 浏览器常驻与自动重启机制（线程安全）
    */
   async ensureBrowser() {
+    if (this.isBrowserInitializing) return;
+
     const now = Date.now();
-    // 如果浏览器不存在，或者超过10分钟，执行重启
-    if (!this.browser || (now - this.lastRestartTime > this.RESTART_INTERVAL)) {
-      if (this.browser) {
-        logger.info('♻️ Periodic browser restart to maintain performance...');
-        await this.browser.close().catch(() => {});
+    const needsRestart = !this.browser || (now - this.lastRestartTime > this.RESTART_INTERVAL);
+
+    if (needsRestart) {
+      this.isBrowserInitializing = true;
+      try {
+        if (this.browser) {
+          logger.info('♻️ Periodic browser restart to maintain performance...');
+          await this.browser.close().catch(() => {});
+        }
+        this.browser = await chromium.launch({
+          headless: true,
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--no-zygote'
+          ]
+        });
+        this.lastRestartTime = now;
+        logger.info('🚀 Browser (re)started and ready.');
+      } catch (err) {
+        logger.error(`❌ Browser launch failed: ${err.message}`);
+      } finally {
+        this.isBrowserInitializing = false;
       }
-      this.browser = await chromium.launch({ 
-        headless: true,
-        args: [
-          '--no-sandbox', 
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage', // 防止大内存占用挂死
-          '--disable-gpu',
-          '--no-zygote'
-        ]
-      });
-      this.lastRestartTime = now;
-      logger.info('🚀 Browser (re)started and ready.');
     }
   }
 
@@ -89,11 +102,12 @@ class WunderRealtimeCollector extends BaseCollector {
     } catch (e) { return null; }
   }
 
+  /**
+   * 单个城市抓取逻辑
+   */
   async scrapeRealtime(cityConfig) {
     const localNow = dayjs().tz(cityConfig.tz);
-    const stdDate = localNow.format('YYYY-MM-DD'); 
-    
-    // 增加随机数防止 CDN 缓存
+    const stdDate = localNow.format('YYYY-MM-DD');
     const baseUrl = `https://www.wunderground.com/weather/${cityConfig.country}/${cityConfig.city}/${cityConfig.station}`;
     const url = `${baseUrl}?_t=${Date.now()}`;
     
@@ -104,14 +118,12 @@ class WunderRealtimeCollector extends BaseCollector {
     try {
       const proxyConfig = await this.getProxy();
 
-      // 每个请求创建轻量级 Context，确保 Cookie 和缓存隔离
       context = await this.browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         viewport: { width: 800, height: 600 },
         proxy: proxyConfig || undefined
       });
 
-      // 强力禁止缓存头
       await context.setExtraHTTPHeaders({
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
@@ -120,11 +132,10 @@ class WunderRealtimeCollector extends BaseCollector {
 
       page = await context.newPage();
       
-      // 优化：禁止加载图片、字体、CSS (SSR不需要CSS渲染)
+      // 优化：禁止加载无关资源
       await page.route('**/*.{png,jpg,jpeg,gif,svg,mp4,woff,woff2,css}', route => route.abort());
 
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
       await page.waitForSelector('.current-temp .wu-value', { timeout: 15000 });
 
       const pageData = await page.evaluate(() => {
@@ -145,10 +156,10 @@ class WunderRealtimeCollector extends BaseCollector {
         result.success = true;
       }
     } catch (error) {
-      logger.error(`❌ [${cityConfig.name}] Realtime Error: ${error.message}`);
+      logger.error(`❌ [${cityConfig.name}] Scrape Error: ${error.message}`);
     } finally {
-      if (page) await page.close();
-      if (context) await context.close();
+      if (page) await page.close().catch(() => {});
+      if (context) await context.close().catch(() => {});
     }
     return result;
   }
@@ -158,66 +169,71 @@ class WunderRealtimeCollector extends BaseCollector {
     const { meta, date_std, current } = data;
     const key = `poly:latest:weather:${meta.station}`;
 
-    const cache = await redis.hmget(key, 'rt_high', 'target_date');
-    const cachedHigh = cache[0];
-    const cachedDate = cache[1];
+    try {
+      const cache = await redis.hmget(key, 'rt_high', 'target_date');
+      const cachedHigh = cache[0];
+      const cachedDate = cache[1];
 
-    let rtRollingHigh = current;
+      let rtRollingHigh = current;
 
-    if (cachedHigh && cachedDate === date_std) {
+      if (cachedHigh && cachedDate === date_std) {
         const oldHigh = parseInt(cachedHigh);
         if (!isNaN(oldHigh) && oldHigh > current) {
-            rtRollingHigh = oldHigh;
+          rtRollingHigh = oldHigh;
         }
-    }
+      }
 
-    await redis.hmset(key, {
+      // 批量写入最新状态
+      await redis.hmset(key, {
         city_name: meta.name,
         target_date: date_std,
         unit: meta.unit,
         rt_current: current,
-        rt_high: rtRollingHigh, 
+        rt_high: rtRollingHigh,
         rt_ts: Date.now(),
-        rt_station_time: dayjs().tz(meta.tz).format('YYYY-MM-DD HH:mm:ss'),
+        rt_station_time: data.station_time || '',
         updated_at: dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD HH:mm:ss')
-    });
-    
-    const vizKey = `poly:viz:series:${meta.station}`;
-    const ts = Date.now();
-    const member = JSON.stringify({ t: current, s: 'rt', ts: ts });
-    await redis.zadd(vizKey, ts, member);
-    await redis.zremrangebyscore(vizKey, '-inf', ts - 86400000);
+      });
+      
+      // 写入时间序列
+      const vizKey = `poly:viz:series:${meta.station}`;
+      const ts = Date.now();
+      const member = JSON.stringify({ t: current, s: 'rt', ts: ts });
+      
+      const pipeline = redis.pipeline();
+      pipeline.zadd(vizKey, ts, member);
+      pipeline.zremrangebyscore(vizKey, '-inf', ts - 86400000); // 仅保留24小时
+      pipeline.publish(`poly:feed:weather:${meta.station}`, JSON.stringify({ station: meta.station, type: 'rt', ts }));
+      await pipeline.exec();
 
-    const message = JSON.stringify({ station: meta.station, type: 'rt', ts: Date.now() });
-    await redis.publish(`poly:feed:weather:${meta.station}`, message);
-    logger.info(`✨ [${meta.name}] Current: ${current}°${meta.unit} | RT High: ${rtRollingHigh}°${meta.unit} | ${dayjs().tz(meta.tz).format('YYYY-MM-DD HH:mm:ss')}`);
+      logger.info(`✨ [${meta.name}] ${current}°${meta.unit} (High: ${rtRollingHigh}°${meta.unit})`);
+    } catch (e) {
+      logger.error(`❌ [${meta.name}] Redis Sync Error: ${e.message}`);
+    }
   }
 
   /**
-   * 核心逻辑调整：串行执行，城市间间隔 2s
+   * 调度核心：并发执行
    */
   async fetch() {
     await this.loadCitiesConfig();
-    if (this.cities.length === 0) {
-        logger.warn('🚫 No cities configured. Skipping cycle.');
-        return { timestamp: Date.now() };
-    }
+    if (this.cities.length === 0) return { timestamp: Date.now() };
 
-    // 1. 确保浏览器常驻/重启
     await this.ensureBrowser();
     
-    // 2. 串行异步处理，不再使用 Promise.all
-    for (const city of this.cities) {
-        const startTime = Date.now();
-        
+    // 限制最大并发数为 3，避免代理被封或 CPU 负载过高
+    const limit = pLimit(3);
+    
+    const tasks = this.cities.map(city => {
+      return limit(async () => {
         const data = await this.scrapeRealtime(city);
         await this.syncToRedis(data);
-        
-        // 3. 间隔 2s 执行下一个城市
-        // 注意：这里用 2000ms 减去已消耗的时间，或者简单硬等 2s 均可
-        // 为了绝对安全，建议直接硬等 2s，确保 CPU 有充分的冷却时间
-        await new Promise(resolve => setTimeout(resolve, 2000));
-    }
+        // 抓取后随机休眠 1-2 秒，模拟人工并降低目标站压力
+        await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1000));
+      });
+    });
+
+    await Promise.allSettled(tasks);
     
     return { timestamp: Date.now() };
   }

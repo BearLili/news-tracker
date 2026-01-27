@@ -5,6 +5,8 @@ import CDCFluCollector from './collectors/cdc_flu_collector.js';
 import CDCMeaslesCollector from './collectors/cdc_measles_collector.js';
 import WunderRealtimeCollector from './collectors/weather_wunder_realtime.js';
 import WunderHistoryCollector from './collectors/weather_wunder_history.js';
+import WunderAxiosCollector from './collectors/weather_wunder_axios.js';
+import WunderDualCollector from './collectors/weather_wunder_dual.js';
 
 
 // 在这里注册所有启用的采集器
@@ -12,8 +14,10 @@ const collectors = [
   // new CDCFluCollector(),      // 独立运行流感
   // new CDCMeaslesCollector(),  // 独立运行麻疹
   // new WeatherMonitorCollector(), // NOAA + OpenMeteo (高频监控)
-  new WunderRealtimeCollector(), 
+  // new WunderRealtimeCollector(), 
   // new WunderHistoryCollector(),
+  // new WunderAxiosCollector(),
+  new WunderDualCollector()
 ];
 
 async function main() {
