@@ -21,7 +21,7 @@ const redis = new Redis({
 class WunderDualSource extends BaseCollector {
   constructor() {
     // 基础心跳 10s (由 JSON 任务主导)
-    super('wunder_dual_monitor', 10 * 1000);
+    super('wunder_dual_monitor', 12 * 1000);
     
     this.cities = [];
     
@@ -273,15 +273,15 @@ class WunderDualSource extends BaseCollector {
     const tasks = [];
 
     // 1. JSON 任务 (总是执行, 10s)
-    const limitJson = pLimit(8);
+    const limitJson = pLimit(4);
     const jsonBatch = this.cities.map(city => limitJson(async () => {
       const data = await this.scrapeJson(city);
       await this.syncToRedis(data);
     }));
     tasks.push(Promise.allSettled(jsonBatch));
 
-    // 2. DOM 任务 (每 30s 执行)
-    if (now - this.lastDomRunTime >= 30 * 1000) {
+    // 2. DOM 任务 (每 50s 执行)
+    if (now - this.lastDomRunTime >= 50 * 1000) {
       await this.ensureBrowser();
       this.lastDomRunTime = now;
       
