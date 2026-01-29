@@ -93,6 +93,12 @@ class WunderDualSource extends BaseCollector {
     } catch (e) { return null; }
   }
 
+  /**
+   * 优化后的 JSON 采集逻辑：
+   * 1. 过滤掉数组 (排除附近站点列表)
+   * 2. 过滤掉非数字 (排除预测数据)
+   * 3. 对所有候选数据按时间戳倒序排列，取最新值
+   */
   async scrapeJson(cityConfig) {
     const url = `https://www.wunderground.com/weather/${cityConfig.country}/${cityConfig.city}/${cityConfig.station}`;
     const result = { meta: cityConfig, success: false, current: null, station_time: null, source: 'json' };
@@ -111,18 +117,43 @@ class WunderDualSource extends BaseCollector {
 
       const $ = cheerio.load(response.data);
       const scriptContent = $('#app-root-state').html();
+      
       if (scriptContent) {
         const rawData = JSON.parse(scriptContent);
-        let obsData = null;
+        
+        // 收集器：存放所有合法的观测数据快照
+        const candidates = [];
+
         for (const key in rawData) {
-          if (rawData[key]?.b && typeof rawData[key].b.temperature === 'number') {
-            obsData = rawData[key].b;
-            break;
+          const item = rawData[key];
+          
+          // 核心过滤：
+          // 1. item.b 必须存在
+          // 2. !Array.isArray(item.b) -> 排除掉是数组的情况（即排除了附近站点列表）
+          // 3. typeof item.b.temperature === 'number' -> 排除掉预测数据(数组)或其他非温度对象
+          if (item?.b && !Array.isArray(item.b) && typeof item.b.temperature === 'number') {
+            
+            // 4. 必须包含有效的时间字段
+            const timeStr = item.b.validTimeLocal || item.b.obsTimeLocal;
+            
+            if (timeStr) {
+              candidates.push({
+                data: item.b,
+                ts: dayjs(timeStr).valueOf() // 转换成时间戳方便比较
+              });
+            }
           }
         }
-        if (obsData) {
-          result.current = this.convertTemperature(obsData.temperature, 'F', cityConfig.unit);
-          result.station_time = obsData.validTimeLocal || obsData.obsTimeLocal;
+
+        // 择优录取：按时间倒序排列，取第一个（最新的）
+        if (candidates.length > 0) {
+          // 排序：最新的在最前面 (timestamp desc)
+          candidates.sort((a, b) => b.ts - a.ts);
+          
+          const bestMatch = candidates[0].data;
+          
+          result.current = this.convertTemperature(bestMatch.temperature, 'F', cityConfig.unit);
+          result.station_time = bestMatch.validTimeLocal || bestMatch.obsTimeLocal;
           result.success = true;
         }
       }
