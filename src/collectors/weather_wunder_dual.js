@@ -288,7 +288,7 @@ class WunderDualSource extends BaseCollector {
       const srcIcon = source === 'json' ? '⚡' : '🐢';
       const fireIcon = isNewRecord ? '🔥' : '';
       
-      logger.info(`${srcIcon} [${meta.name}] ${current}°${meta.unit} (High: ${rtRollingHigh}) via ${source} ${fireIcon}`);
+      logger.info(`${srcIcon} [${meta.name}] ${current}°${meta.unit} (High: ${rtRollingHigh}) 【${dayjs().tz(meta.tz).format('YYYY-MM-DD HH:mm:ss')}】 ${fireIcon}`);
 
     } catch (e) {
       logger.error(`❌ Redis Sync Error: ${e.message}`);
