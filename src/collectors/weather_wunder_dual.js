@@ -229,6 +229,9 @@ class WunderDualSource extends BaseCollector {
     const date_std = dayjs().tz(meta.tz).format('YYYY-MM-DD');
     const key = `poly:latest:weather:${meta.station}`;
 
+    const isSameDay = date_std && data?.station_time && this.isSameDay(data?.station_time, date_std);
+    if (!isSameDay) return;
+
     try {
       // 1. 获取旧缓存
       const cached = await redis.hmget(key, 'rt_high', 'target_date');
@@ -293,6 +296,39 @@ class WunderDualSource extends BaseCollector {
     } catch (e) {
       logger.error(`❌ Redis Sync Error: ${e.message}`);
     }
+  }
+
+  /**
+   * 判断 station_time 和 date_std 是否为同一天
+   * @param {string} stationTime - "5:08 AM CST on January 30, 2026" 或 "2026-01-30T06:38:32-0500"
+   * @param {string} dateStd - "2026-01-30"
+   * @returns {boolean}
+   */
+  isSameDay(stationTime, dateStd) {
+    if (!stationTime || !dateStd) return false;
+
+    let targetDateStr = '';
+
+    // 格式 1: "5:08 AM CST on January 30, 2026"
+    if (stationTime.includes(' on ')) {
+        // 以 " on " 分割，取最后一部分 "January 30, 2026"
+        const parts = stationTime.split(' on ');
+        const datePart = parts[parts.length - 1].trim(); 
+        
+        // dayjs 可以直接解析 "Month DD, YYYY" 这种标准英语格式
+        const d = dayjs(datePart);
+        if (d.isValid()) {
+            targetDateStr = d.format('YYYY-MM-DD');
+        }
+    } 
+    // 格式 2: "2026-01-30T06:38:32-0500"
+    else {
+        // 直接截取前 10 位 "2026-01-30"
+        // 这样做的好处是完全忽略时区转换，强制读取字面上的“当地日期”
+        targetDateStr = stationTime.substring(0, 10);
+    }
+
+    return targetDateStr === dateStd;
   }
 
   // --- 调度器 ---
