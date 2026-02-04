@@ -7,6 +7,7 @@ import WunderRealtimeCollector from './collectors/weather_wunder_realtime.js';
 import WunderHistoryCollector from './collectors/weather_wunder_history.js';
 import WunderAxiosCollector from './collectors/weather_wunder_axios.js';
 import WunderDualCollector from './collectors/weather_wunder_dual.js';
+import WeatherForecastCollector from './collectors/weather_flow.js';
 
 
 // 在这里注册所有启用的采集器
@@ -17,7 +18,8 @@ const collectors = [
   // new WunderRealtimeCollector(), 
   // new WunderHistoryCollector(),
   // new WunderAxiosCollector(),
-  new WunderDualCollector()
+  new WunderDualCollector(),
+  new WeatherForecastCollector()
 ];
 
 async function main() {
