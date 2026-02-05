@@ -14,7 +14,7 @@ const redis = new Redis({ host: '127.0.0.1', port: 6379 });
 
 class WeatherForecastCollector extends BaseCollector {
   constructor() {
-    super('weather_forecast_4days', 30 * 60 * 1000);
+    super('weather_forecast_4days', 15 * 60 * 1000);
     this.targets = [];
   }
 
