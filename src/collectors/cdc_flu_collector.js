@@ -5,7 +5,7 @@ import logger from '../utils/logger.js';
 
 class CDCFluCollector extends BaseCollector {
   constructor() {
-    super('cdc_flu', 60 * 1000); // Key: poly:latest:cdc_flu
+    super('cdc_flu',60 * 60 * 1000); // Key: poly:latest:cdc_flu
     this.baseUrl = 'https://www.cdc.gov/fluview/modules';
     
     // 标记：是否是进程启动后的第一次运行

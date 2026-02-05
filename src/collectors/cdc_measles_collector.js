@@ -5,7 +5,7 @@ import logger from '../utils/logger.js';
 
 class CDCMeaslesCollector extends BaseCollector {
   constructor() {
-    super('cdc_measles', 60 * 1000); // Key: poly:latest:cdc_measles
+    super('cdc_measles', 60 * 60 * 1000); // Key: poly:latest:cdc_measles
     this.urls = {
       annual: 'https://www.cdc.gov/wcms/vizdata/measles/measles_hosp.json',
       weekly: 'https://www.cdc.gov/wcms/vizdata/measles/MeaslesCasesWeekly.json'

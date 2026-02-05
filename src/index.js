@@ -12,8 +12,8 @@ import WeatherForecastCollector from './collectors/weather_flow.js';
 
 // 在这里注册所有启用的采集器
 const collectors = [
-  // new CDCFluCollector(),      // 独立运行流感
-  // new CDCMeaslesCollector(),  // 独立运行麻疹
+  new CDCFluCollector(),      // 独立运行流感
+  new CDCMeaslesCollector(),  // 独立运行麻疹
   // new WeatherMonitorCollector(), // NOAA + OpenMeteo (高频监控)
   // new WunderRealtimeCollector(), 
   // new WunderHistoryCollector(),
