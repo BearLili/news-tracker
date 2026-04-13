@@ -96,7 +96,8 @@ class WeatherForecastCollector extends BaseCollector {
             
             logger.info(`🚚 Batch ${batchNo}/${batchTotal}, cities=${batch.length}`);
 
-            const tasks = batch.map(async (target) => {
+            const tasks = batch.map(async (target, idx) => {
+                if (idx > 0) await this.sleep(this.randInt(1500, 3000));
                 // 1) 并行采集
                 const results = await Promise.allSettled([
                     this.fetchWunderground(target),
