@@ -32,7 +32,7 @@ class WeatherForecastCollector extends BaseCollector {
             const rawData = await redis.hgetall('poly:config:cities');
             this.targets = Object.values(rawData).map(s => {
                 try { return JSON.parse(s); } catch (e) { return null; }
-            }).filter(Boolean);
+            }).filter(c => c && c.fetchData === true);
             logger.info(`📋 Loaded ${this.targets.length} cities from Redis config.`);
         } catch (e) {
             logger.error(`❌ Load Config Error: ${e.message}`);
@@ -186,7 +186,7 @@ class WeatherForecastCollector extends BaseCollector {
 
             // 非最后一批才等待
             if (i + batchSize < total) {
-                const gap = this.randInt(3000, 5000);
+                const gap = this.randInt(5000, 8000);
                 logger.info(`⏳ Wait ${gap}ms before next batch...`);
                 await this.sleep(gap);
             }
@@ -289,25 +289,26 @@ class WeatherForecastCollector extends BaseCollector {
         const modelNames = ['ecmwf_ifs025', 'gfs_seamless', 'icon_seamless'];
         const out = {};
 
-        await Promise.all(modelNames.map(async (model) => {
-            try {
-                const url = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}&daily=temperature_2m_max&timezone=auto&forecast_days=5&temperature_unit=${unitParam}&models=${model}`;
-                const response = await axios.get(url, { timeout: 8000 });
-                const daily = response.data?.daily;
-                if (!daily?.time || !daily?.temperature_2m_max) {
-                    out[model] = [];
-                    return;
-                }
+        try {
+            const url = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}&daily=temperature_2m_max&timezone=auto&forecast_days=5&temperature_unit=${unitParam}&models=${modelNames.join(',')}`;
+            const response = await axios.get(url, { timeout: 8000 });
+            const daily = response.data?.daily;
+            if (!daily?.time) return out;
+
+            for (const model of modelNames) {
+                const key = `temperature_2m_max_${model}`;
+                const temps = daily[key];
+                if (!Array.isArray(temps)) { out[model] = []; continue; }
 
                 out[model] = daily.time.map((dateStr, idx) => {
-                    const temp = daily.temperature_2m_max[idx];
+                    const temp = temps[idx];
                     if (!dateStr || typeof temp !== 'number') return null;
                     return { date: dateStr, high: Math.round(temp) };
                 }).filter(Boolean);
-            } catch (e) {
-                out[model] = [];
             }
-        }));
+        } catch (e) {
+            modelNames.forEach(m => { out[m] = []; });
+        }
 
         return out;
     }
