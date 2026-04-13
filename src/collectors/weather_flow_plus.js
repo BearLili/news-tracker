@@ -16,6 +16,7 @@ class WeatherForecastCollector extends BaseCollector {
     constructor() {
         super('weather_forecast_4days', 15 * 60 * 1000);
         this.targets = [];
+        this.noaaGridCache = new Map(); // key: "lat,lon" -> { gridId, gridX, gridY }
     }
 
     sleep(ms) {
@@ -102,30 +103,29 @@ class WeatherForecastCollector extends BaseCollector {
                     this.fetchOpenMeteo(target),
                     target.type === 'us' ? this.fetchNOAA(target) : Promise.resolve([]),
                     target.type === 'intl' ? this.fetchMetNo(target) : Promise.resolve([]),
-                    // this.fetchOpenMeteoModels(target)
+                    this.fetchOpenMeteoModels(target)
                 ]);
-
 
                 const wunderData = results[0].status === 'fulfilled' ? results[0].value : [];
                 const openData = results[1].status === 'fulfilled' ? results[1].value : [];
                 const noaaData = results[2].status === 'fulfilled' ? results[2].value : [];
                 const metNoData = results[3].status === 'fulfilled' ? results[3].value : [];
+                const openMModels = results[4].status === 'fulfilled' ? results[4].value : {};
 
                 const wunderMap = this.toMapByDate(wunderData);
                 const openMap = this.toMapByDate(openData);
                 const noaaMap = this.toMapByDate(noaaData);
                 const metNoMap = this.toMapByDate(metNoData);
-
-                // const modelMapByName = Object.fromEntries(
-                //     Object.entries(openMModels || {}).map(([name, rows]) => [name, this.toMapByDate(rows)])
-                // );
+                const modelMapByName = Object.fromEntries(
+                    Object.entries(openMModels || {}).map(([name, rows]) => [name, this.toMapByDate(rows)])
+                );
 
                 const today = dayjs().tz(target.tz);
 
                 const logBuffer = [];
                 logBuffer.push(`\n📊 [${target.name} | ${target.station}] Forecast Summary (Next 4 Days) [Unit: ${target.unit}]:`);
-                logBuffer.push(`    Date    |  Wunder |  OpenM  |  NOAA   |  MET.NO `);
-                logBuffer.push(` -----------|---------|---------|---------|---------`);
+                logBuffer.push(`    Date    |  Wunder |  OpenM  |  NOAA   |  MET.NO | Models`);
+                logBuffer.push(` -----------|---------|---------|---------|---------|--------`);
 
                 for (let i = 0; i < 4; i++) {
                     const targetDate = today.add(i, 'day').format('YYYY-MM-DD');
@@ -136,24 +136,19 @@ class WeatherForecastCollector extends BaseCollector {
                     const nVal = noaaMap.get(targetDate);
                     const mVal = metNoMap.get(targetDate);
 
-                    // const modelVals = Object.entries(modelMapByName).map(([name, map]) => {
-                    //     const row = map.get(targetDate);
-                    //     return { name, high: row?.high };
-                    // }).filter(x => typeof x.high === 'number');
-
-                    // const modelHighs = modelVals.map(v => v.high);
-                    // const modelMedian = modelHighs.length ? this.median(modelHighs) : null;
-                    // const modelSpread = modelHighs.length ? (Math.max(...modelHighs) - Math.min(...modelHighs)) : null;
-
                     const wTemp = wVal ? `${wVal.high}°` : '--';
                     const oTemp = oVal ? `${oVal.high}°` : '--';
                     const nTemp = nVal ? `${nVal.high}°` : '--';
                     const mTemp = mVal ? `${mVal.high}°` : '--';
 
-                    const valArr = [wVal?.high, oVal?.high, nVal?.high, mVal?.high].filter(v => typeof v === 'number');
-                    const avg = valArr.length > 0 ? (valArr.reduce((a, b) => a + b, 0) / valArr.length).toFixed(1) + '°' : '--';
+                    // 多模型明细
+                    const modelParts = Object.entries(modelMapByName).map(([name, map]) => {
+                        const row = map.get(targetDate);
+                        return row ? `${name}:${row.high}°` : null;
+                    }).filter(Boolean);
+                    const modelStr = modelParts.length > 0 ? modelParts.join(' ') : '--';
 
-                    logBuffer.push(` ${targetDate} | ${wTemp.padEnd(7)} | ${oTemp.padEnd(7)} | ${nTemp.padEnd(7)} | ${mTemp.padEnd(7)} | Avg: ${avg}`);
+                    logBuffer.push(` ${targetDate} | ${wTemp.padEnd(7)} | ${oTemp.padEnd(7)} | ${nTemp.padEnd(7)} | ${mTemp.padEnd(7)} | ${modelStr}`);
 
                     const nowTs = Date.now();
                     const payload = {};
@@ -162,34 +157,19 @@ class WeatherForecastCollector extends BaseCollector {
                     if (nVal) payload['noaa'] = JSON.stringify({ high: nVal.high, unit: target.unit, ts: nowTs, source: 'noaa' });
                     if (mVal) payload['met_no'] = JSON.stringify({ high: mVal.high, unit: target.unit, ts: nowTs, source: 'met_no' });
 
-                    // // Open-Meteo 多模型明细（适用于 us + intl）
-                    // const modelPayload = {};
-                    // const modelNameList = Object.keys(modelMapByName);
-                    // modelNameList.forEach((name, idx) => {
-                    //     const row = modelMapByName[name].get(targetDate);
-                    //     if (row && typeof row.high === 'number') {
-                    //         modelPayload[`open_meteo_m${idx + 1}`] = JSON.stringify({
-                    //             model: name,
-                    //             high: row.high,
-                    //             unit: target.unit,
-                    //             ts: nowTs,
-                    //             source: 'open_meteo_model'
-                    //         });
-                    //     }
-                    // });
-
-                    // if (modelMedian !== null) {
-                    //     modelPayload['open_meteo_multi'] = JSON.stringify({
-                    //         high: Number(modelMedian.toFixed(1)),
-                    //         spread: modelSpread !== null ? Number(modelSpread.toFixed(1)) : null,
-                    //         count: modelHighs.length,
-                    //         unit: target.unit,
-                    //         ts: nowTs,
-                    //         source: 'open_meteo_multi'
-                    //     });
-                    // }
-
-                    // Object.assign(payload, modelPayload);
+                    // Open-Meteo 多模型明细，每个模型独立存为一个 field
+                    for (const [name, map] of Object.entries(modelMapByName)) {
+                        const row = map.get(targetDate);
+                        if (row && typeof row.high === 'number') {
+                            const shortName = name.replace('_ifs025', '').replace('_seamless', '');
+                            payload[`open_meteo_${shortName}`] = JSON.stringify({
+                                high: row.high,
+                                unit: target.unit,
+                                ts: nowTs,
+                                source: `open_meteo_${shortName}`
+                            });
+                        }
+                    }
 
                     if (Object.keys(payload).length > 0) {
                         payload['updated_at'] = nowTs;
@@ -387,14 +367,24 @@ class WeatherForecastCollector extends BaseCollector {
     async fetchNOAA(target) {
         try {
             const proxyConfig = await this.getAxiosProxy();
+            const cacheKey = `${target.lat},${target.lon}`;
+            let gridId, gridX, gridY;
 
-            const pointUrl = `https://api.weather.gov/points/${target.lat},${target.lon}`;
-            const pointRes = await axios.get(pointUrl, {
-                headers: { 'User-Agent': 'PolyBot_Forecast/1.0' },
-                timeout: 8000,
-                proxy: proxyConfig || false
-            });
-            const { gridId, gridX, gridY } = pointRes.data.properties;
+            try {
+                const pointUrl = `https://api.weather.gov/points/${target.lat},${target.lon}`;
+                const pointRes = await axios.get(pointUrl, {
+                    headers: { 'User-Agent': 'PolyBot_Forecast/1.0' },
+                    timeout: 8000,
+                    proxy: proxyConfig || false
+                });
+                ({ gridId, gridX, gridY } = pointRes.data.properties);
+                this.noaaGridCache.set(cacheKey, { gridId, gridX, gridY });
+            } catch (e) {
+                const cached = this.noaaGridCache.get(cacheKey);
+                if (!cached) throw e;
+                ({ gridId, gridX, gridY } = cached);
+                logger.debug(`[NOAA] /points failed for ${target.station}, using cached grid`);
+            }
 
             const forecastUrl = `https://api.weather.gov/gridpoints/${gridId}/${gridX},${gridY}/forecast`;
             const foreRes = await axios.get(forecastUrl, {
