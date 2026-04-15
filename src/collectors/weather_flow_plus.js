@@ -125,8 +125,8 @@ class WeatherForecastCollector extends BaseCollector {
 
                 const logBuffer = [];
                 logBuffer.push(`\n📊 [${target.name} | ${target.station}] Forecast Summary (Next 4 Days) [Unit: ${target.unit}]:`);
-                logBuffer.push(`    Date    |  Wunder |  OpenM  |  NOAA   |  MET.NO | Models`);
-                logBuffer.push(` -----------|---------|---------|---------|---------|--------`);
+                logBuffer.push(`    Date    |  Wunder H/L |  OpenM H/L |  NOAA H/L  |  MET.NO H/L`);
+                logBuffer.push(` -----------|-------------|------------|------------|------------`);
 
                 for (let i = 0; i < 4; i++) {
                     const targetDate = today.add(i, 'day').format('YYYY-MM-DD');
@@ -137,26 +137,20 @@ class WeatherForecastCollector extends BaseCollector {
                     const nVal = noaaMap.get(targetDate);
                     const mVal = metNoMap.get(targetDate);
 
-                    const wTemp = wVal ? `${wVal.high}°` : '--';
-                    const oTemp = oVal ? `${oVal.high}°` : '--';
-                    const nTemp = nVal ? `${nVal.high}°` : '--';
-                    const mTemp = mVal ? `${mVal.high}°` : '--';
+                    const fmt = (v) => v ? `${v.high}/${v.low ?? '-'}` : '--';
+                    const wStr = fmt(wVal);
+                    const oStr = fmt(oVal);
+                    const nStr = fmt(nVal);
+                    const mStr = fmt(mVal);
 
-                    // 多模型明细
-                    const modelParts = Object.entries(modelMapByName).map(([name, map]) => {
-                        const row = map.get(targetDate);
-                        return row ? `${name}:${row.high}°` : null;
-                    }).filter(Boolean);
-                    const modelStr = modelParts.length > 0 ? modelParts.join(' ') : '--';
-
-                    logBuffer.push(` ${targetDate} | ${wTemp.padEnd(7)} | ${oTemp.padEnd(7)} | ${nTemp.padEnd(7)} | ${mTemp.padEnd(7)} | ${modelStr}`);
+                    logBuffer.push(` ${targetDate} | ${wStr.padEnd(11)} | ${oStr.padEnd(10)} | ${nStr.padEnd(10)} | ${mStr.padEnd(10)}`);
 
                     const nowTs = Date.now();
                     const payload = {};
-                    if (wVal) payload['wunder'] = JSON.stringify({ high: wVal.high, unit: target.unit, ts: nowTs, source: 'wunder' });
-                    if (oVal) payload['open_meteo'] = JSON.stringify({ high: oVal.high, unit: target.unit, ts: nowTs, source: 'open_meteo' });
-                    if (nVal) payload['noaa'] = JSON.stringify({ high: nVal.high, unit: target.unit, ts: nowTs, source: 'noaa' });
-                    if (mVal) payload['met_no'] = JSON.stringify({ high: mVal.high, unit: target.unit, ts: nowTs, source: 'met_no' });
+                    if (wVal) payload['wunder'] = JSON.stringify({ high: wVal.high, low: wVal.low, unit: target.unit, ts: nowTs, source: 'wunder' });
+                    if (oVal) payload['open_meteo'] = JSON.stringify({ high: oVal.high, low: oVal.low, unit: target.unit, ts: nowTs, source: 'open_meteo' });
+                    if (nVal) payload['noaa'] = JSON.stringify({ high: nVal.high, low: nVal.low, unit: target.unit, ts: nowTs, source: 'noaa' });
+                    if (mVal) payload['met_no'] = JSON.stringify({ high: mVal.high, low: mVal.low, unit: target.unit, ts: nowTs, source: 'met_no' });
 
                     // Open-Meteo 多模型明细，每个模型独立存为一个 field
                     for (const [name, map] of Object.entries(modelMapByName)) {
@@ -165,6 +159,7 @@ class WeatherForecastCollector extends BaseCollector {
                             const shortName = name.replace('_ifs025', '').replace('_seamless', '');
                             payload[`open_meteo_${shortName}`] = JSON.stringify({
                                 high: row.high,
+                                low: row.low,
                                 unit: target.unit,
                                 ts: nowTs,
                                 source: `open_meteo_${shortName}`
@@ -225,21 +220,23 @@ class WeatherForecastCollector extends BaseCollector {
                 if (item?.b && item.b.calendarDayTemperatureMax && item.b.validTimeLocal) {
                     const dates = item.b.validTimeLocal;
                     const highs = item.b.calendarDayTemperatureMax; // 这是 F
+                    const lows = item.b.calendarDayTemperatureMin || [];
 
                     if (Array.isArray(dates) && Array.isArray(highs)) {
                         for (let i = 0; i < Math.min(dates.length, highs.length); i++) {
                             const timeStr = dates[i];
-                            let temp = highs[i]; // Raw is F
+                            let high = highs[i]; // Raw is F
+                            let low = lows[i];
 
-                            if (timeStr && typeof temp === 'number') {
+                            if (timeStr && typeof high === 'number') {
                                 const dateStr = dayjs(timeStr).format('YYYY-MM-DD');
 
-                                // 如果配置要求 C，则转换
                                 if (target.unit === 'C') {
-                                    temp = this.fToC(temp);
+                                    high = this.fToC(high);
+                                    if (typeof low === 'number') low = this.fToC(low);
                                 }
 
-                                result.push({ date: dateStr, high: temp });
+                                result.push({ date: dateStr, high, low: typeof low === 'number' ? low : null });
                             }
                         }
                         if (result.length > 0) break;
@@ -260,7 +257,7 @@ class WeatherForecastCollector extends BaseCollector {
     async fetchOpenMeteo(target) {
         try {
             const unitParam = target.unit === 'F' ? 'fahrenheit' : 'celsius';
-            const url = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}&daily=temperature_2m_max&timezone=auto&forecast_days=5&temperature_unit=${unitParam}`;
+            const url = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5&temperature_unit=${unitParam}`;
 
             const response = await axios.get(url, { timeout: 8000 });
             const daily = response.data?.daily;
@@ -270,9 +267,10 @@ class WeatherForecastCollector extends BaseCollector {
 
             for (let i = 0; i < daily.time.length; i++) {
                 const dateStr = daily.time[i];
-                const temp = daily.temperature_2m_max[i];
-                if (dateStr && typeof temp === 'number') {
-                    result.push({ date: dateStr, high: Math.round(temp) });
+                const high = daily.temperature_2m_max[i];
+                const low = daily.temperature_2m_min?.[i];
+                if (dateStr && typeof high === 'number') {
+                    result.push({ date: dateStr, high: Math.round(high), low: typeof low === 'number' ? Math.round(low) : null });
                 }
             }
             return result;
@@ -291,20 +289,23 @@ class WeatherForecastCollector extends BaseCollector {
         const out = {};
 
         try {
-            const url = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}&daily=temperature_2m_max&timezone=auto&forecast_days=5&temperature_unit=${unitParam}&models=${modelNames.join(',')}`;
+            const url = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5&temperature_unit=${unitParam}&models=${modelNames.join(',')}`;
             const response = await axios.get(url, { timeout: 8000 });
             const daily = response.data?.daily;
             if (!daily?.time) return out;
 
             for (const model of modelNames) {
-                const key = `temperature_2m_max_${model}`;
-                const temps = daily[key];
-                if (!Array.isArray(temps)) { out[model] = []; continue; }
+                const maxKey = `temperature_2m_max_${model}`;
+                const minKey = `temperature_2m_min_${model}`;
+                const highs = daily[maxKey];
+                const lows = daily[minKey];
+                if (!Array.isArray(highs)) { out[model] = []; continue; }
 
                 out[model] = daily.time.map((dateStr, idx) => {
-                    const temp = temps[idx];
-                    if (!dateStr || typeof temp !== 'number') return null;
-                    return { date: dateStr, high: Math.round(temp) };
+                    const high = highs[idx];
+                    const low = lows?.[idx];
+                    if (!dateStr || typeof high !== 'number') return null;
+                    return { date: dateStr, high: Math.round(high), low: typeof low === 'number' ? Math.round(low) : null };
                 }).filter(Boolean);
             }
         } catch (e) {
@@ -332,16 +333,17 @@ class WeatherForecastCollector extends BaseCollector {
             if (!Array.isArray(series) || series.length === 0) return [];
 
             const maxByDate = new Map();
+            const minByDate = new Map();
             for (const point of series) {
                 const iso = point?.time;
                 const tempC = point?.data?.instant?.details?.air_temperature;
                 if (!iso || typeof tempC !== 'number') continue;
 
                 const dateStr = dayjs(iso).tz(target.tz).format('YYYY-MM-DD');
-                const prev = maxByDate.get(dateStr);
-                if (prev === undefined || tempC > prev) {
-                    maxByDate.set(dateStr, tempC);
-                }
+                const prevMax = maxByDate.get(dateStr);
+                if (prevMax === undefined || tempC > prevMax) maxByDate.set(dateStr, tempC);
+                const prevMin = minByDate.get(dateStr);
+                if (prevMin === undefined || tempC < prevMin) minByDate.set(dateStr, tempC);
             }
 
             const today = dayjs().tz(target.tz).startOf('day');
@@ -349,10 +351,11 @@ class WeatherForecastCollector extends BaseCollector {
             for (let i = 0; i < 5; i++) {
                 const d = today.add(i, 'day').format('YYYY-MM-DD');
                 if (!maxByDate.has(d)) continue;
-                let temp = maxByDate.get(d);
-                if (target.unit === 'F') temp = this.cToF(temp);
-                else temp = Math.round(temp);
-                result.push({ date: d, high: temp });
+                let high = maxByDate.get(d);
+                let low = minByDate.get(d);
+                if (target.unit === 'F') { high = this.cToF(high); low = low !== undefined ? this.cToF(low) : null; }
+                else { high = Math.round(high); low = low !== undefined ? Math.round(low) : null; }
+                result.push({ date: d, high, low });
             }
 
             return result;
@@ -396,24 +399,28 @@ class WeatherForecastCollector extends BaseCollector {
             });
 
             const periods = foreRes.data.properties.periods;
-            const result = [];
-            const seenDates = new Set();
+            const highByDate = new Map();
+            const lowByDate = new Map();
 
             for (const p of periods) {
-                if (p.isDaytime) {
-                    const dateStr = dayjs(p.startTime).tz(target.tz).format('YYYY-MM-DD');
-                    if (!seenDates.has(dateStr)) {
-                        let temp = p.temperature; // Raw is F
-
-                        // 如果配置要求 C，则转换
-                        if (target.unit === 'C') {
-                            temp = this.fToC(temp);
-                        }
-
-                        result.push({ date: dateStr, high: temp });
-                        seenDates.add(dateStr);
-                    }
+                const dateStr = dayjs(p.startTime).tz(target.tz).format('YYYY-MM-DD');
+                if (p.isDaytime && !highByDate.has(dateStr)) {
+                    highByDate.set(dateStr, p.temperature);
                 }
+                if (!p.isDaytime && !lowByDate.has(dateStr)) {
+                    lowByDate.set(dateStr, p.temperature);
+                }
+            }
+
+            const result = [];
+            for (const [dateStr, high] of highByDate) {
+                let h = high;
+                let l = lowByDate.get(dateStr);
+                if (target.unit === 'C') {
+                    h = this.fToC(h);
+                    if (typeof l === 'number') l = this.fToC(l);
+                }
+                result.push({ date: dateStr, high: h, low: typeof l === 'number' ? l : null });
             }
             return result;
         } catch (e) {
