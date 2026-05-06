@@ -233,18 +233,59 @@ class WeatherForecastCollector extends BaseCollector {
             }
             if (!hourlyTemps) return [];
 
-            const highByDate = new Map();
-            const lowByDate = new Map();
+            // 1) 先把当前 hourly 拿到的所有小时温度写入 Redis 快照
+            // 快照结构: poly:wunder:snap:{station}:{YYYY-MM-DD} (Hash)
+            //   field = HH (0-23, 本地小时)
+            //   value = 温度 (F)
+            // 多次跑同一小时会被覆盖，等于"消失前最后一次看到的值"
+            const snapByDate = new Map(); // dateStr -> { hour: temp }
             for (let i = 0; i < hourlyTemps.length; i++) {
-                const t = hourlyTemps[i]; // F
+                const t = hourlyTemps[i];
                 const ts = hourlyTimes[i];
                 if (typeof t !== 'number' || !ts) continue;
-                const dateStr = dayjs(ts).format('YYYY-MM-DD');
-                const prevH = highByDate.get(dateStr);
-                if (prevH === undefined || t > prevH) highByDate.set(dateStr, t);
-                const prevL = lowByDate.get(dateStr);
-                if (prevL === undefined || t < prevL) lowByDate.set(dateStr, t);
+                const local = dayjs(ts);
+                const dateStr = local.format('YYYY-MM-DD');
+                const hour = local.format('HH');
+                if (!snapByDate.has(dateStr)) snapByDate.set(dateStr, {});
+                snapByDate.get(dateStr)[hour] = t;
             }
+
+            const writePipe = redis.pipeline();
+            for (const [dateStr, hours] of snapByDate) {
+                const key = `poly:wunder:snap:${target.station}:${dateStr}`;
+                writePipe.hmset(key, hours);
+                writePipe.expire(key, 14 * 24 * 60 * 60);
+            }
+            await writePipe.exec();
+
+            // 2) 读取最近 8 天的所有快照（昨天 + 今天 + 未来 6 天）
+            // 这样今天已过去的小时（hourly 里没有了）会从历史快照里取到
+            const today = dayjs().tz(target.tz);
+            const datesToRead = [];
+            for (let i = -1; i < 7; i++) {
+                datesToRead.push(today.add(i, 'day').format('YYYY-MM-DD'));
+            }
+            const readPipe = redis.pipeline();
+            for (const d of datesToRead) {
+                readPipe.hgetall(`poly:wunder:snap:${target.station}:${d}`);
+            }
+            const cached = await readPipe.exec();
+
+            // 3) 聚合所有快照点 → 日 high/low
+            const highByDate = new Map();
+            const lowByDate = new Map();
+            cached.forEach(([err, hours], idx) => {
+                if (err || !hours) return;
+                const dateStr = datesToRead[idx];
+                for (const t of Object.values(hours)) {
+                    const tv = parseFloat(t);
+                    if (isNaN(tv)) continue;
+                    const prevH = highByDate.get(dateStr);
+                    if (prevH === undefined || tv > prevH) highByDate.set(dateStr, tv);
+                    const prevL = lowByDate.get(dateStr);
+                    if (prevL === undefined || tv < prevL) lowByDate.set(dateStr, tv);
+                }
+            });
 
             const result = [];
             for (const [dateStr, h] of highByDate) {
