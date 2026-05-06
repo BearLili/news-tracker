@@ -91,14 +91,29 @@ class WeatherSettlementCollector extends BaseCollector {
         const url = `https://api.weather.com/v1/location/${target.station}:9:${country}/observations/historical.json` +
                     `?apiKey=${TWC_API_KEY}&units=${units}&startDate=${startUtc}&endDate=${endUtc}`;
 
-        const proxyConfig = await this.getAxiosProxy();
-        const response = await axios.get(url, {
-            timeout: 15000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
-            proxy: proxyConfig || false
-        });
+        // 代理池里有坏代理时，遇到 407/连接错误自动换代理重试
+        let response;
+        const maxRetries = 3;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            const proxyConfig = await this.getAxiosProxy();
+            try {
+                response = await axios.get(url, {
+                    timeout: 15000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    },
+                    proxy: proxyConfig || false
+                });
+                break;
+            } catch (e) {
+                const status = e?.response?.status;
+                const code = e?.code;
+                const isProxyErr = status === 407
+                    || ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ECONNABORTED', 'EHOSTUNREACH'].includes(code);
+                if (!isProxyErr || attempt === maxRetries) throw e;
+                logger.debug(`[Settlement|${target.station}] retry ${attempt}/${maxRetries} due to ${status || code}`);
+            }
+        }
 
         const obs = response.data?.observations || [];
         const byDate = {};
