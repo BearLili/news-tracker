@@ -391,7 +391,8 @@ class WeatherForecastCollector extends BaseCollector {
                 logger.debug(`[NOAA] /points failed for ${target.station}, using cached grid`);
             }
 
-            const forecastUrl = `https://api.weather.gov/gridpoints/${gridId}/${gridX},${gridY}/forecast`;
+            // 用 hourly 接口，按本地日聚合，避免 /forecast 粗粒度和今天高温丢失的问题
+            const forecastUrl = `https://api.weather.gov/gridpoints/${gridId}/${gridX},${gridY}/forecast/hourly`;
             const foreRes = await axios.get(forecastUrl, {
                 headers: { 'User-Agent': 'PolyBot_Forecast/1.0' },
                 timeout: 8000,
@@ -403,13 +404,13 @@ class WeatherForecastCollector extends BaseCollector {
             const lowByDate = new Map();
 
             for (const p of periods) {
+                if (typeof p.temperature !== 'number') continue;
                 const dateStr = dayjs(p.startTime).tz(target.tz).format('YYYY-MM-DD');
-                if (p.isDaytime && !highByDate.has(dateStr)) {
-                    highByDate.set(dateStr, p.temperature);
-                }
-                if (!p.isDaytime && !lowByDate.has(dateStr)) {
-                    lowByDate.set(dateStr, p.temperature);
-                }
+                const t = p.temperature; // 原始 F
+                const prevHigh = highByDate.get(dateStr);
+                if (prevHigh === undefined || t > prevHigh) highByDate.set(dateStr, t);
+                const prevLow = lowByDate.get(dateStr);
+                if (prevLow === undefined || t < prevLow) lowByDate.set(dateStr, t);
             }
 
             const result = [];
