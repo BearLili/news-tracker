@@ -39,6 +39,21 @@ class WeatherSettlementCollector extends BaseCollector {
     sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
     randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
+    async getAxiosProxy() {
+        try {
+            const proxyStr = await redis.srandmember('poly:proxylist');
+            if (!proxyStr) return null;
+            const parts = proxyStr.split(':');
+            if (parts.length < 2) return null;
+            return {
+                protocol: 'http',
+                host: parts[0],
+                port: parseInt(parts[1]),
+                auth: (parts[2] && parts[3]) ? { username: parts[2], password: parts[3] } : undefined
+            };
+        } catch (e) { return null; }
+    }
+
     async loadCitiesConfig() {
         try {
             const rawData = await redis.hgetall('poly:config:cities');
@@ -76,11 +91,13 @@ class WeatherSettlementCollector extends BaseCollector {
         const url = `https://api.weather.com/v1/location/${target.station}:9:${country}/observations/historical.json` +
                     `?apiKey=${TWC_API_KEY}&units=${units}&startDate=${startUtc}&endDate=${endUtc}`;
 
+        const proxyConfig = await this.getAxiosProxy();
         const response = await axios.get(url, {
             timeout: 15000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
+            },
+            proxy: proxyConfig || false
         });
 
         const obs = response.data?.observations || [];
