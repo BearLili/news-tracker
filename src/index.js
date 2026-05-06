@@ -9,6 +9,7 @@ import WunderAxiosCollector from './collectors/weather_wunder_axios.js';
 import WunderDualCollector from './collectors/weather_wunder_dual.js';
 import WeatherForecastCollector from './collectors/weather_flow.js';
 import WeatherFlowPlusCollector from './collectors/weather_flow_plus.js';
+import WeatherSettlementCollector from './collectors/weather_settlement.js';
 
 
 // 在这里注册所有启用的采集器
@@ -16,11 +17,12 @@ const collectors = [
   // new CDCFluCollector(),      // 独立运行流感
   // new CDCMeaslesCollector(),  // 独立运行麻疹
   // new WeatherMonitorCollector(), // NOAA + OpenMeteo (高频监控)
-  // new WunderRealtimeCollector(), 
+  // new WunderRealtimeCollector(),
   // new WunderHistoryCollector(),
   // new WunderAxiosCollector(),
   // new WunderDualCollector(),
-  new WeatherFlowPlusCollector()
+  new WeatherFlowPlusCollector(),
+  new WeatherSettlementCollector()  // historical METAR 实测数据，用于结算对账
 ];
 
 async function main() {
