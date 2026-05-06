@@ -391,26 +391,59 @@ class WeatherForecastCollector extends BaseCollector {
                 logger.debug(`[NOAA] /points failed for ${target.station}, using cached grid`);
             }
 
-            // 用 hourly 接口，按本地日聚合，避免 /forecast 粗粒度和今天高温丢失的问题
-            const forecastUrl = `https://api.weather.gov/gridpoints/${gridId}/${gridX},${gridY}/forecast/hourly`;
-            const foreRes = await axios.get(forecastUrl, {
-                headers: { 'User-Agent': 'PolyBot_Forecast/1.0' },
-                timeout: 8000,
-                proxy: proxyConfig || false
-            });
+            // 并行拉取：实测观测（今天的真实数据）+ hourly 预报（未来）
+            const hourlyUrl = `https://api.weather.gov/gridpoints/${gridId}/${gridX},${gridY}/forecast/hourly`;
+            const obsUrl = `https://api.weather.gov/stations/${target.station}/observations?limit=500`;
 
-            const periods = foreRes.data.properties.periods;
+            const [foreRes, obsRes] = await Promise.allSettled([
+                axios.get(hourlyUrl, {
+                    headers: { 'User-Agent': 'PolyBot_Forecast/1.0' },
+                    timeout: 8000,
+                    proxy: proxyConfig || false
+                }),
+                axios.get(obsUrl, {
+                    headers: { 'User-Agent': 'PolyBot_Forecast/1.0' },
+                    timeout: 8000,
+                    proxy: proxyConfig || false
+                })
+            ]);
+
             const highByDate = new Map();
             const lowByDate = new Map();
 
-            for (const p of periods) {
-                if (typeof p.temperature !== 'number') continue;
-                const dateStr = dayjs(p.startTime).tz(target.tz).format('YYYY-MM-DD');
-                const t = p.temperature; // 原始 F
-                const prevHigh = highByDate.get(dateStr);
-                if (prevHigh === undefined || t > prevHigh) highByDate.set(dateStr, t);
-                const prevLow = lowByDate.get(dateStr);
-                if (prevLow === undefined || t < prevLow) lowByDate.set(dateStr, t);
+            // 1) 实测观测点（覆盖最近 ~2 天，每 5 分钟一条）—— Polymarket 裁决基准
+            if (obsRes.status === 'fulfilled') {
+                const features = obsRes.value.data?.features || [];
+                for (const f of features) {
+                    const ts = f?.properties?.timestamp;
+                    const tempC = f?.properties?.temperature?.value;
+                    if (!ts || typeof tempC !== 'number') continue;
+                    const dateStr = dayjs(ts).tz(target.tz).format('YYYY-MM-DD');
+                    const tempF = (tempC * 9 / 5) + 32; // 转 F 与其他源对齐
+                    const prevHigh = highByDate.get(dateStr);
+                    if (prevHigh === undefined || tempF > prevHigh) highByDate.set(dateStr, tempF);
+                    const prevLow = lowByDate.get(dateStr);
+                    if (prevLow === undefined || tempF < prevLow) lowByDate.set(dateStr, tempF);
+                }
+            } else {
+                logger.warn(`[NOAA] observations failed ${target.station}: ${obsRes.reason?.message}`);
+            }
+
+            // 2) hourly 预报（未来几天）—— 跟实测合并取 max/min，今天会同时受两边影响
+            if (foreRes.status === 'fulfilled') {
+                const periods = foreRes.value.data?.properties?.periods || [];
+                for (const p of periods) {
+                    if (typeof p.temperature !== 'number') continue;
+                    const dateStr = dayjs(p.startTime).tz(target.tz).format('YYYY-MM-DD');
+                    // 统一转 F，与 observations 对齐
+                    const t = p.temperatureUnit === 'C' ? (p.temperature * 9 / 5) + 32 : p.temperature;
+                    const prevHigh = highByDate.get(dateStr);
+                    if (prevHigh === undefined || t > prevHigh) highByDate.set(dateStr, t);
+                    const prevLow = lowByDate.get(dateStr);
+                    if (prevLow === undefined || t < prevLow) lowByDate.set(dateStr, t);
+                }
+            } else {
+                logger.warn(`[NOAA] hourly forecast failed ${target.station}: ${foreRes.reason?.message}`);
             }
 
             const result = [];
@@ -420,6 +453,9 @@ class WeatherForecastCollector extends BaseCollector {
                 if (target.unit === 'C') {
                     h = this.fToC(h);
                     if (typeof l === 'number') l = this.fToC(l);
+                } else {
+                    h = Math.round(h);
+                    if (typeof l === 'number') l = Math.round(l);
                 }
                 result.push({ date: dateStr, high: h, low: typeof l === 'number' ? l : null });
             }
