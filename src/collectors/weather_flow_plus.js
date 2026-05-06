@@ -199,7 +199,10 @@ class WeatherForecastCollector extends BaseCollector {
         if (!target.wunderUrl) return [];
         try {
             const proxyConfig = await this.getAxiosProxy();
-            const response = await axios.get(target.wunderUrl, {
+            // 用 hourly 页面而非 forecast 页面，拿逐小时预报，按本地日聚合得到 high/low
+            // Wunder 是 Polymarket 的裁决数据源，需要最新数据
+            const hourlyUrl = target.wunderUrl.replace('/weather/', '/hourly/');
+            const response = await axios.get(hourlyUrl, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     'Cache-Control': 'no-cache'
@@ -213,35 +216,48 @@ class WeatherForecastCollector extends BaseCollector {
             if (!scriptContent) return [];
 
             const rawData = JSON.parse(scriptContent);
-            const result = [];
 
+            // 找逐小时温度数组：长度匹配的 temperature + validTimeLocal，长度通常 100+
+            let hourlyTemps = null;
+            let hourlyTimes = null;
             for (const key in rawData) {
-                const item = rawData[key];
-                if (item?.b && item.b.calendarDayTemperatureMax && item.b.validTimeLocal) {
-                    const dates = item.b.validTimeLocal;
-                    const highs = item.b.calendarDayTemperatureMax; // 这是 F
-                    const lows = item.b.calendarDayTemperatureMin || [];
-
-                    if (Array.isArray(dates) && Array.isArray(highs)) {
-                        for (let i = 0; i < Math.min(dates.length, highs.length); i++) {
-                            const timeStr = dates[i];
-                            let high = highs[i]; // Raw is F
-                            let low = lows[i];
-
-                            if (timeStr && typeof high === 'number') {
-                                const dateStr = dayjs(timeStr).format('YYYY-MM-DD');
-
-                                if (target.unit === 'C') {
-                                    high = this.fToC(high);
-                                    if (typeof low === 'number') low = this.fToC(low);
-                                }
-
-                                result.push({ date: dateStr, high, low: typeof low === 'number' ? low : null });
-                            }
-                        }
-                        if (result.length > 0) break;
-                    }
+                const b = rawData[key]?.b;
+                if (!b) continue;
+                if (Array.isArray(b.temperature) && Array.isArray(b.validTimeLocal)
+                    && b.temperature.length === b.validTimeLocal.length
+                    && b.temperature.length > 100) {
+                    hourlyTemps = b.temperature;
+                    hourlyTimes = b.validTimeLocal;
+                    break;
                 }
+            }
+            if (!hourlyTemps) return [];
+
+            const highByDate = new Map();
+            const lowByDate = new Map();
+            for (let i = 0; i < hourlyTemps.length; i++) {
+                const t = hourlyTemps[i]; // F
+                const ts = hourlyTimes[i];
+                if (typeof t !== 'number' || !ts) continue;
+                const dateStr = dayjs(ts).format('YYYY-MM-DD');
+                const prevH = highByDate.get(dateStr);
+                if (prevH === undefined || t > prevH) highByDate.set(dateStr, t);
+                const prevL = lowByDate.get(dateStr);
+                if (prevL === undefined || t < prevL) lowByDate.set(dateStr, t);
+            }
+
+            const result = [];
+            for (const [dateStr, h] of highByDate) {
+                let high = h;
+                let low = lowByDate.get(dateStr);
+                if (target.unit === 'C') {
+                    high = this.fToC(high);
+                    if (typeof low === 'number') low = this.fToC(low);
+                } else {
+                    high = Math.round(high);
+                    if (typeof low === 'number') low = Math.round(low);
+                }
+                result.push({ date: dateStr, high, low: typeof low === 'number' ? low : null });
             }
             return result;
         } catch (e) {
