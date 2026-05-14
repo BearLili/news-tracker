@@ -153,7 +153,9 @@ class WeatherForecastCollector extends BaseCollector {
                     let temp = highs[i]; // Raw is F
 
                     if (timeStr && typeof temp === 'number') {
-                         const dateStr = dayjs(timeStr).format('YYYY-MM-DD');
+                         // validTimeLocal 形如 "2026-05-14T07:00:00+0900"，
+                         // 必须按 target.tz format，否则跑在 UTC 服务器上日期会漂一天
+                         const dateStr = dayjs(timeStr).tz(target.tz).format('YYYY-MM-DD');
                          
                          // 如果配置要求 C，则转换
                          if (target.unit === 'C') {
