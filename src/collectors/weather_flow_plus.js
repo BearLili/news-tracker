@@ -120,13 +120,16 @@ class WeatherForecastCollector extends BaseCollector {
                 const modelMapByName = Object.fromEntries(
                     Object.entries(openMModels || {}).map(([name, rows]) => [name, this.toMapByDate(rows)])
                 );
+                const ecmwfMap = modelMapByName['ecmwf_ifs025'] || new Map();
+                const gfsMap = modelMapByName['gfs_seamless'] || new Map();
+                const iconMap = modelMapByName['icon_seamless'] || new Map();
 
                 const today = dayjs().tz(target.tz);
 
                 const logBuffer = [];
                 logBuffer.push(`\n📊 [${target.name} | ${target.station}] Forecast Summary (Next 4 Days) [Unit: ${target.unit}]:`);
-                logBuffer.push(`    Date    |  Wunder H/L |  OpenM H/L |  NOAA H/L  |  MET.NO H/L`);
-                logBuffer.push(` -----------|-------------|------------|------------|------------`);
+                logBuffer.push(`    Date    |  Wunder H/L |  OpenM H/L |  ECMWF H/L |  GFS H/L   |  ICON H/L  |  NOAA H/L  |  MET.NO H/L`);
+                logBuffer.push(` -----------|-------------|------------|------------|------------|------------|------------|------------`);
 
                 for (let i = 0; i < 4; i++) {
                     const targetDate = today.add(i, 'day').format('YYYY-MM-DD');
@@ -136,14 +139,20 @@ class WeatherForecastCollector extends BaseCollector {
                     const oVal = openMap.get(targetDate);
                     const nVal = noaaMap.get(targetDate);
                     const mVal = metNoMap.get(targetDate);
+                    const eVal = ecmwfMap.get(targetDate);
+                    const gVal = gfsMap.get(targetDate);
+                    const icVal = iconMap.get(targetDate);
 
                     const fmt = (v) => v ? `${v.high}/${v.low ?? '-'}` : '--';
                     const wStr = fmt(wVal);
                     const oStr = fmt(oVal);
                     const nStr = fmt(nVal);
                     const mStr = fmt(mVal);
+                    const eStr = fmt(eVal);
+                    const gStr = fmt(gVal);
+                    const icStr = fmt(icVal);
 
-                    logBuffer.push(` ${targetDate} | ${wStr.padEnd(11)} | ${oStr.padEnd(10)} | ${nStr.padEnd(10)} | ${mStr.padEnd(10)}`);
+                    logBuffer.push(` ${targetDate} | ${wStr.padEnd(11)} | ${oStr.padEnd(10)} | ${eStr.padEnd(10)} | ${gStr.padEnd(10)} | ${icStr.padEnd(10)} | ${nStr.padEnd(10)} | ${mStr.padEnd(10)}`);
 
                     const nowTs = Date.now();
                     const payload = {};
