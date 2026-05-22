@@ -10,6 +10,7 @@ import WunderDualCollector from './collectors/weather_wunder_dual.js';
 import WeatherForecastCollector from './collectors/weather_flow.js';
 import WeatherFlowPlusCollector from './collectors/weather_flow_plus.js';
 import WeatherSettlementCollector from './collectors/weather_settlement.js';
+import NPMPricingCollector from './collectors/npm_pricing.js';
 
 
 // 在这里注册所有启用的采集器
@@ -22,7 +23,8 @@ const collectors = [
   // new WunderAxiosCollector(),
   // new WunderDualCollector(),
   new WeatherFlowPlusCollector(),
-  new WeatherSettlementCollector()  // historical METAR 实测数据，用于结算对账
+  new WeatherSettlementCollector(),  // historical METAR 实测数据，用于结算对账
+  new NPMPricingCollector()          // Nasdaq Private Market 私募公司估值
 ];
 
 async function main() {
