@@ -10,6 +10,7 @@ import WunderDualCollector from './collectors/weather_wunder_dual.js';
 import WeatherForecastCollector from './collectors/weather_flow.js';
 import WeatherFlowPlusCollector from './collectors/weather_flow_plus.js';
 import WeatherSettlementCollector from './collectors/weather_settlement.js';
+import WeatherObservationsCollector from './collectors/weather_observations.js';
 import NPMPricingCollector from './collectors/npm_pricing.js';
 
 
@@ -22,9 +23,10 @@ const collectors = [
   // new WunderHistoryCollector(),
   // new WunderAxiosCollector(),
   // new WunderDualCollector(),
+  // new WeatherSettlementCollector(),  // 已被 WeatherObservationsCollector 取代（保留以便回滚）
   new WeatherFlowPlusCollector(),
-  new WeatherSettlementCollector(),  // historical METAR 实测数据，用于结算对账
-  new NPMPricingCollector()          // Nasdaq Private Market 私募公司估值
+  new WeatherObservationsCollector(), // 结算（TWC 历史 METAR）+ 预记录（aviationweather METAR）二合一
+  new NPMPricingCollector()           // Nasdaq Private Market 私募公司估值
 ];
 
 async function main() {
