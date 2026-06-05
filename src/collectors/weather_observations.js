@@ -144,29 +144,54 @@ class WeatherObservationsCollector extends BaseCollector {
      * METAR 数据是 Celsius，按 target.unit 转换 + 按 target.tz 聚合到本地日 high/low
      * 仅保留 dates 内的日期（避免远日观测污染）
      */
+    // 注意：firstObsTs 语义是"当前 72h 窗口里能见到的最早 obsTime"，
+    // 一旦最早那条观测滑出 72h 窗口，firstObsTs 会向后跳——不是"该日历日的首条观测时间"。
     aggregateMetarByDate(obsList, target, validDates) {
         const byDate = {};
         for (const o of obsList) {
             const d = this.toLocalDate(o.obsTime, target.tz);
             if (!validDates.includes(d)) continue;
-            if (!byDate[d]) byDate[d] = { temps: [], count: 0, lastObsTs: 0, lastRaw: '' };
-            byDate[d].temps.push(o.temp);
-            byDate[d].count++;
-            if (o.obsTime > byDate[d].lastObsTs) {
-                byDate[d].lastObsTs = o.obsTime;
-                byDate[d].lastRaw = o.raw || '';
+            if (!byDate[d]) byDate[d] = {
+                count: 0,
+                highC: -Infinity, highObsTs: 0,
+                lowC: +Infinity,  lowObsTs: 0,
+                latestObsTs: 0, latestC: null,
+                firstObsTs: 0,
+                lastRaw: '',
+                detail: []
+            };
+            const slot = byDate[d];
+            slot.count++;
+            // 严格 >，让"最早达到该极值"的观测胜出（同温取最早）
+            if (o.temp > slot.highC) { slot.highC = o.temp; slot.highObsTs = o.obsTime; }
+            if (o.temp < slot.lowC)  { slot.lowC  = o.temp; slot.lowObsTs  = o.obsTime; }
+            if (o.obsTime > slot.latestObsTs) {
+                slot.latestObsTs = o.obsTime;
+                slot.latestC = o.temp;
+                slot.lastRaw = o.raw || slot.lastRaw;
             }
+            if (slot.firstObsTs === 0 || o.obsTime < slot.firstObsTs) {
+                slot.firstObsTs = o.obsTime;
+            }
+            slot.detail.push({ ts: o.obsTime, tempC: o.temp, raw: o.raw || '' });
         }
+        const conv = (c) => (c === null || c === -Infinity || c === +Infinity) ? null
+            : (target.unit === 'F' ? this.cToF(c) : Math.round(c));
         const result = {};
         for (const [d, info] of Object.entries(byDate)) {
-            const highC = Math.max(...info.temps);
-            const lowC  = Math.min(...info.temps);
+            info.detail.sort((a, b) => a.ts - b.ts);
             result[d] = {
-                high: target.unit === 'F' ? this.cToF(highC) : Math.round(highC),
-                low:  target.unit === 'F' ? this.cToF(lowC)  : Math.round(lowC),
+                high: conv(info.highC),
+                low:  conv(info.lowC),
                 count: info.count,
-                lastObsTs: info.lastObsTs,
-                lastRaw: info.lastRaw
+                highObsTs: info.highObsTs,
+                lowObsTs: info.lowObsTs,
+                latestTemp: conv(info.latestC),
+                latestObsTs: info.latestObsTs,
+                firstObsTs: info.firstObsTs,
+                lastObsTs: info.latestObsTs,
+                lastRaw: info.lastRaw,
+                detail: info.detail.map(x => ({ ts: x.ts, temp: conv(x.tempC) }))
             };
         }
         return result;
@@ -256,6 +281,8 @@ class WeatherObservationsCollector extends BaseCollector {
         const yesterday = now.subtract(1, 'day').format('YYYY-MM-DD');
         const valid = [today, yesterday];
 
+        // 聚合逻辑与 METAR 完全对称（拉 → 按本地日过滤 → 找 max/min/latest + 收集 detail）
+        // 唯一差异：TWC 返回的 temp 已是目标单位，不需要 cToF 转换
         const byDate = {};
         for (const o of obs) {
             const t = o?.temp;
@@ -263,19 +290,37 @@ class WeatherObservationsCollector extends BaseCollector {
             if (typeof t !== 'number' || typeof ts !== 'number') continue;
             const d = this.toLocalDate(ts, target.tz);
             if (!valid.includes(d)) continue;
-            if (!byDate[d]) byDate[d] = { temps: [], count: 0, lastObsTs: 0 };
-            byDate[d].temps.push(t);
-            byDate[d].count++;
-            if (ts > byDate[d].lastObsTs) byDate[d].lastObsTs = ts;
+            if (!byDate[d]) byDate[d] = {
+                count: 0,
+                high: -Infinity, highObsTs: 0,
+                low: +Infinity,  lowObsTs: 0,
+                latestObsTs: 0, latestTemp: null,
+                firstObsTs: 0,
+                detail: []
+            };
+            const slot = byDate[d];
+            slot.count++;
+            if (t > slot.high) { slot.high = t; slot.highObsTs = ts; }
+            if (t < slot.low)  { slot.low  = t; slot.lowObsTs  = ts; }
+            if (ts > slot.latestObsTs) { slot.latestObsTs = ts; slot.latestTemp = t; }
+            if (slot.firstObsTs === 0 || ts < slot.firstObsTs) slot.firstObsTs = ts;
+            slot.detail.push({ ts, temp: t });
         }
         const result = {};
         for (const [d, info] of Object.entries(byDate)) {
-            // TWC 返回的 temp 已是目标单位（units=m|e），直接 round 即可
+            info.detail.sort((a, b) => a.ts - b.ts);
             result[d] = {
-                high: Math.round(Math.max(...info.temps)),
-                low: Math.round(Math.min(...info.temps)),
+                high: Math.round(info.high),
+                low: Math.round(info.low),
                 count: info.count,
-                lastObsTs: info.lastObsTs
+                highObsTs: info.highObsTs,
+                lowObsTs: info.lowObsTs,
+                latestTemp: info.latestTemp !== null ? Math.round(info.latestTemp) : null,
+                latestObsTs: info.latestObsTs,
+                firstObsTs: info.firstObsTs,
+                lastObsTs: info.latestObsTs,
+                // detail 里 temp 也四舍五入保持一致（settlement 默认整数）
+                detail: info.detail.map(x => ({ ts: x.ts, temp: Math.round(x.temp) }))
             };
         }
         return result;
@@ -314,19 +359,36 @@ class WeatherObservationsCollector extends BaseCollector {
 
     /**
      * type: 'metar' | 'settlement'
-     * byDate: { date: { high, low, count, lastObsTs, lastRaw? } } (已是 target.unit 单位)
+     * byDate: { date: { high, low, count, highObsTs, lowObsTs, latestTemp, latestObsTs,
+     *                   firstObsTs, lastObsTs, lastRaw?, detail } } (已是 target.unit)
      * 只有 high/low/count 发生变化才计入 updates（推送给策略）
+     *
+     * 写入 Redis：
+     *   poly:{type}:{station}:{date}        hash - 主状态
+     *   poly:{type}:obs:{station}:{date}    string(JSON) - obs detail（供 UI 点击展开看明细）
+     *
+     * 跟踪三类"首次见到"语义：
+     *   high_obs_ts        max 对应那条观测的发生时间
+     *   high_first_seen_at 我们首次记录到这个 high 的本地 wall clock
+     *   low_obs_ts / low_first_seen_at 同理
+     *   latest_obs_ts      最新一条观测的发生时间
+     *   latest_temp        最新一条观测的温度（不是 max！METAR 高敏感场景需要）
+     *   latest_first_seen_at 我们首次记录到这条 latest 的本地 wall clock
+     *   first_seen_at      整个 hash key 首次创建的本地 wall clock（任何字段写入即记录）
      */
     async commitObservations(target, byDate, type) {
         const updates = [];
         const nowMs = Date.now();
         for (const [date, info] of Object.entries(byDate)) {
             const key = `poly:${type}:${target.station}:${date}`;
+            const detailKey = `poly:${type}:obs:${target.station}:${date}`;
             const existing = await redis.hgetall(key);
             const prevHigh = existing.high !== undefined && existing.high !== '' ? Number(existing.high) : null;
             const prevLow  = existing.low  !== undefined && existing.low  !== '' ? Number(existing.low)  : null;
             const prevCount = existing.obs_count !== undefined && existing.obs_count !== ''
                 ? Number(existing.obs_count) : 0;
+            const prevLatestObsTs = existing.latest_obs_ts !== undefined && existing.latest_obs_ts !== ''
+                ? Number(existing.latest_obs_ts) : 0;
 
             const changed = (prevHigh !== info.high)
                          || (prevLow !== info.low)
@@ -341,13 +403,43 @@ class WeatherObservationsCollector extends BaseCollector {
                 high: info.high,
                 low: info.low,
                 obs_count: info.count,
+                first_obs_ts: info.firstObsTs || '',
                 last_obs_ts: info.lastObsTs,
                 updated_at: nowMs
             };
             if (info.lastRaw) payload.last_raw = info.lastRaw;
 
+            // 首次创建 hash 时记录 first_seen_at
+            if (!existing.first_seen_at) payload.first_seen_at = nowMs;
+
+            // high 变化（首次 OR 严格更高）→ 重新记录 high_obs_ts + first_seen
+            if (prevHigh === null || info.high > prevHigh) {
+                payload.high_obs_ts = info.highObsTs || '';
+                payload.high_first_seen_at = nowMs;
+            }
+            // low 变化（首次 OR 严格更低）→ 同理
+            if (prevLow === null || info.low < prevLow) {
+                payload.low_obs_ts = info.lowObsTs || '';
+                payload.low_first_seen_at = nowMs;
+            }
+            // 有新观测进来（latest_obs_ts 推进）→ 更新 latest_*
+            if (info.latestObsTs > prevLatestObsTs) {
+                if (info.latestTemp !== null && info.latestTemp !== undefined) {
+                    payload.latest_temp = info.latestTemp;
+                }
+                payload.latest_obs_ts = info.latestObsTs;
+                payload.latest_first_seen_at = nowMs;
+            }
+
             await redis.hset(key, payload);
             await redis.expire(key, 14 * 24 * 60 * 60);
+
+            // 写明细列表（每次全量重写：仅反映当前 72h 窗口里看到的观测）
+            // 注意：byDate[date] 为空（窗口里这天没观测）时，commitObservations 根本不会进入这条循环，
+            // 所以老的 detailKey 会自然保留——这是有意的，避免短暂的网络抖动清掉昨天的明细。
+            if (info.detail && info.detail.length > 0) {
+                await redis.set(detailKey, JSON.stringify(info.detail), 'EX', 14 * 24 * 60 * 60);
+            }
 
             if (changed) {
                 updates.push({
@@ -362,7 +454,9 @@ class WeatherObservationsCollector extends BaseCollector {
                     prev_low: prevLow,
                     obs_count: info.count,
                     prev_count: prevCount,
+                    first_obs_ts: info.firstObsTs || null,
                     last_obs_ts: info.lastObsTs,
+                    first_seen_at: existing.first_seen_at ? Number(existing.first_seen_at) : nowMs,
                 });
             }
         }

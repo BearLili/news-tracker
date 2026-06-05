@@ -18,6 +18,7 @@
 <main>
   <section id="tab-forecast" class="tab active">
     <div class="meta">
+      <input type="search" class="city-filter" data-tab="forecast" placeholder="🔍 filter by city or station…">
       <span id="forecast-updated" class="updated">loading…</span>
       <button onclick="loadTab('forecast')">↻ refresh</button>
     </div>
@@ -25,6 +26,7 @@
   </section>
   <section id="tab-observations" class="tab">
     <div class="meta">
+      <input type="search" class="city-filter" data-tab="observations" placeholder="🔍 filter by city or station…">
       <span id="observations-updated" class="updated">loading…</span>
       <button onclick="loadTab('observations')">↻ refresh</button>
     </div>

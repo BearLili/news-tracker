@@ -99,6 +99,12 @@ async function getForecastData() {
     return { cities: results, ts: Date.now() };
 }
 
+function parseDetailList(raw) {
+    if (!raw) return [];
+    try { const v = JSON.parse(raw); return Array.isArray(v) ? v : []; }
+    catch { return []; }
+}
+
 async function getObservationsData() {
     const cities = await loadCities();
     const results = [];
@@ -109,17 +115,34 @@ async function getObservationsData() {
         const yesterday = now.subtract(1, 'day').format('YYYY-MM-DD');
 
         const pipe = redis.pipeline();
+        // 主状态 hash 4 个
         pipe.hgetall(`poly:settlement:${c.station}:${today}`);
         pipe.hgetall(`poly:settlement:${c.station}:${yesterday}`);
         pipe.hgetall(`poly:metar:${c.station}:${today}`);
         pipe.hgetall(`poly:metar:${c.station}:${yesterday}`);
+        // 明细列表 4 个（点击展开查看用）
+        pipe.get(`poly:settlement:obs:${c.station}:${today}`);
+        pipe.get(`poly:settlement:obs:${c.station}:${yesterday}`);
+        pipe.get(`poly:metar:obs:${c.station}:${today}`);
+        pipe.get(`poly:metar:obs:${c.station}:${yesterday}`);
         const rs = await pipe.exec();
+
+        const enrich = (hash, detail) => ({
+            ...(hash || {}),
+            detail: parseDetailList(detail)
+        });
 
         results.push({
             city: c,
             local_now: now.format('YYYY-MM-DD HH:mm'),
-            settlement: { today: rs[0][1] || {}, yesterday: rs[1][1] || {} },
-            metar:      { today: rs[2][1] || {}, yesterday: rs[3][1] || {} },
+            settlement: {
+                today:     enrich(rs[0][1], rs[4][1]),
+                yesterday: enrich(rs[1][1], rs[5][1]),
+            },
+            metar: {
+                today:     enrich(rs[2][1], rs[6][1]),
+                yesterday: enrich(rs[3][1], rs[7][1]),
+            },
         });
     }
     return { cities: results, ts: Date.now() };

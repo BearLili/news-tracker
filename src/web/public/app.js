@@ -13,8 +13,8 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 // =====================
 // 通用辅助
 // =====================
-const escape = s => String(s ?? '').replace(/[&<>"]/g, c => ({
-  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'
+const escape = s => String(s ?? '').replace(/[&<>"']/g, c => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[c]));
 
 const fmtTs = (ms) => {
@@ -62,7 +62,7 @@ function renderForecast(root, data) {
     return;
   }
   root.innerHTML = data.cities.map(({ city, days }) => `
-    <div class="card" data-station="${escape(city.station)}">
+    <div class="card" data-station="${escape(city.station)}" data-name="${escape((city.name || '').toLowerCase())}">
       <div class="card-header">
         <div class="card-title">
           ${escape(city.name)} <small>${escape(city.station)} · ${escape(city.unit)} · ${escape(city.tz)}</small>
@@ -104,55 +104,152 @@ function renderForecast(root, data) {
 // =====================
 // Tab 2: Observations
 // =====================
+// 哪些日期块当前是展开的——key 形如 `KLGA|2026-06-04`，跨 SSE 重渲染保持状态
+const expandedSections = new Set();
+
 function renderObservations(root, data) {
   if (!data.cities || data.cities.length === 0) {
     root.innerHTML = '<div class="empty">no cities configured</div>';
     return;
   }
-  root.innerHTML = data.cities.map(({ city, local_now, settlement, metar }) => `
-    <div class="card" data-station="${escape(city.station)}">
+  // 城市卡片 → 日期块 → settlement/metar 并排 + 可展开明细
+  root.innerHTML = data.cities.map(({ city, local_now, settlement, metar }) => {
+    const todayDate = (settlement.today?.date) || (metar.today?.date) || '';
+    const yesterdayDate = (settlement.yesterday?.date) || (metar.yesterday?.date) || '';
+    return `
+    <div class="card" data-station="${escape(city.station)}" data-name="${escape((city.name || '').toLowerCase())}">
       <div class="card-header">
         <div class="card-title">
           ${escape(city.name)} <small>${escape(city.station)} · ${escape(city.unit)} · local ${escape(local_now)}</small>
         </div>
       </div>
-      <table>
+      ${dateBlock(city.station, 'today', todayDate, city.unit, settlement.today, metar.today)}
+      ${dateBlock(city.station, 'yesterday', yesterdayDate, city.unit, settlement.yesterday, metar.yesterday)}
+    </div>`;
+  }).join('');
+}
+
+/**
+ * 一个日期块：可点击 header + 摘要表（settlement / metar 各一行）+ 隐藏的明细面板
+ */
+function dateBlock(station, when, dateStr, unit, settlementData, metarData) {
+  const label = dateStr ? `${dateStr} · ${when}` : when;
+  // 三段 stateKey 避免不同城市的 today 块状态串扰
+  const stateKey = `${station}|${when}|${dateStr || ''}`;
+  const expanded = expandedSections.has(stateKey);
+  const caret = expanded ? '▼' : '▶';
+  const hidden = expanded ? '' : 'hidden';
+
+  return `
+    <div class="date-section">
+      <div class="date-section-header" onclick="toggleSection(this, '${escape(stateKey)}')">
+        <span class="caret">${caret}</span>
+        <span class="date-label">${escape(label)}</span>
+        <small class="hint">${expanded ? 'click to collapse' : 'click to view observation detail'}</small>
+      </div>
+      <table class="obs-summary">
         <thead>
           <tr>
             <th>Source</th>
-            <th>Date</th>
-            <th>High</th>
-            <th>Low</th>
+            <th>High <small>@ obs · first seen</small></th>
+            <th>Low <small>@ obs · first seen</small></th>
+            <th>Latest <small>@ obs · first seen</small></th>
             <th>Obs#</th>
-            <th>Last Obs</th>
           </tr>
         </thead>
         <tbody>
-          ${obsRow('settlement', city.unit, settlement.yesterday)}
-          ${obsRow('settlement', city.unit, settlement.today)}
-          ${obsRow('metar', city.unit, metar.yesterday)}
-          ${obsRow('metar', city.unit, metar.today)}
+          ${obsRow('settlement', unit, settlementData)}
+          ${obsRow('metar', unit, metarData)}
         </tbody>
       </table>
+      <div class="obs-detail-pane" ${hidden}>
+        ${detailSection('settlement', unit, settlementData)}
+        ${detailSection('metar', unit, metarData)}
+      </div>
     </div>
-  `).join('');
+  `;
+}
+
+/** 一个 high/low/latest 单元格：温度 + 观测时间 + 我们首次看到的时间 */
+function obsCell(value, unit, obsTs, firstSeenAt) {
+  if (value === null || value === undefined || value === '') return '<span class="dash">—</span>';
+  const obsTime = obsTs ? fmtTsSec(Number(obsTs)) : '—';
+  const seen = firstSeenAt ? fmtTs(firstSeenAt) : '—';
+  return `<div class="obs-cell">
+    <span class="obs-temp">${escape(value)}°${escape(unit)}</span>
+    <small class="obs-meta">@ ${escape(obsTime)}</small>
+    <small class="obs-meta">seen ${escape(seen)}</small>
+  </div>`;
 }
 
 function obsRow(type, unit, d) {
   const tag = `<span class="tag tag-${type}">${type}</span>`;
-  if (!d || Object.keys(d).length === 0) {
-    return `<tr><td>${tag}</td><td colspan="5" class="dash">no data</td></tr>`;
+  // 显式判 null/undefined/空串，避免 0°C 被误判为 no data
+  if (!d || d.high === undefined || d.high === '' || d.high === null) {
+    return `<tr><td>${tag}</td><td colspan="4" class="dash">no data</td></tr>`;
   }
-  const lastObs = d.last_obs_ts ? fmtTsSec(Number(d.last_obs_ts)) : '—';
   return `<tr>
     <td>${tag}</td>
-    <td>${escape(d.date)}</td>
-    <td class="value-num">${escape(d.high)}°${escape(unit)}</td>
-    <td class="value-num">${escape(d.low)}°${escape(unit)}</td>
-    <td class="value-num">${escape(d.obs_count)}</td>
-    <td>${lastObs}</td>
+    <td>${obsCell(d.high, unit, d.high_obs_ts, d.high_first_seen_at)}</td>
+    <td>${obsCell(d.low, unit, d.low_obs_ts, d.low_first_seen_at)}</td>
+    <td>${obsCell(d.latest_temp, unit, d.latest_obs_ts, d.latest_first_seen_at)}</td>
+    <td class="value-num">${escape(d.obs_count || 0)}</td>
   </tr>`;
 }
+
+/** 展开后的单个 source 的全量观测列表 */
+function detailSection(type, unit, d) {
+  if (!d || !d.detail || d.detail.length === 0) {
+    return `<div class="detail-block">
+      <div class="detail-title"><span class="tag tag-${type}">${type}</span></div>
+      <div class="dash" style="padding:8px">no observation detail</div>
+    </div>`;
+  }
+  const high = d.high !== undefined && d.high !== '' ? Number(d.high) : null;
+  const low  = d.low  !== undefined && d.low  !== '' ? Number(d.low)  : null;
+  // 倒序（最新的在上）
+  const rows = d.detail.slice().reverse().map(o => {
+    const isHi = high !== null && o.temp === high;
+    const isLo = low  !== null && o.temp === low;
+    const cls = isHi ? 'detail-row-high' : (isLo ? 'detail-row-low' : '');
+    return `<tr class="${cls}">
+      <td>${fmtTsSec(o.ts)}</td>
+      <td class="value-num">${escape(o.temp)}°${escape(unit)}</td>
+      <td>${isHi ? '<span class="mini-tag mini-tag-high">HIGH</span>' : (isLo ? '<span class="mini-tag mini-tag-low">LOW</span>' : '')}</td>
+    </tr>`;
+  }).join('');
+
+  return `<div class="detail-block">
+    <div class="detail-title">
+      <span class="tag tag-${type}">${type}</span>
+      <small>${d.detail.length} observations (newest first)</small>
+    </div>
+    <table class="detail-table">
+      <thead><tr><th>Obs Time</th><th>Temp</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+function toggleSection(headerEl, stateKey) {
+  const section = headerEl.parentElement;
+  const pane = section.querySelector('.obs-detail-pane');
+  const caret = headerEl.querySelector('.caret');
+  const hint = headerEl.querySelector('.hint');
+  if (pane.hidden) {
+    pane.hidden = false;
+    caret.textContent = '▼';
+    if (hint) hint.textContent = 'click to collapse';
+    expandedSections.add(stateKey);
+  } else {
+    pane.hidden = true;
+    caret.textContent = '▶';
+    if (hint) hint.textContent = 'click to view observation detail';
+    expandedSections.delete(stateKey);
+  }
+}
+// 让 inline onclick 能拿到
+window.toggleSection = toggleSection;
 
 // =====================
 // Tab 3: NPM Pricing
@@ -226,6 +323,8 @@ async function loadTab(name) {
     const root = document.getElementById(name + '-content');
     RENDERERS[name](root, data);
     setUpdated(name);
+    // 渲染后重新应用当前 filter
+    applyFilter(name);
     // 闪一下当前激活的 tab，表示刚刷新
     const tab = document.getElementById('tab-' + name);
     if (tab && tab.classList.contains('active')) flash(tab);
@@ -234,6 +333,47 @@ async function loadTab(name) {
     if (root) root.innerHTML = `<div class="empty" style="color:#f85149">error: ${escape(e.message)}</div>`;
   }
 }
+
+// =====================
+// 城市过滤
+// =====================
+function applyFilter(tabName) {
+  const input = document.querySelector(`.city-filter[data-tab="${tabName}"]`);
+  if (!input) return;
+  const q = (input.value || '').trim().toLowerCase();
+  const root = document.getElementById(tabName + '-content');
+  if (!root) return;
+  const cards = root.querySelectorAll('.card');
+  let shown = 0;
+  for (const c of cards) {
+    if (!q) {
+      c.classList.remove('hidden-by-filter');
+      shown++;
+      continue;
+    }
+    const station = (c.dataset.station || '').toLowerCase();
+    const name = (c.dataset.name || '').toLowerCase();
+    if (station.includes(q) || name.includes(q)) {
+      c.classList.remove('hidden-by-filter');
+      shown++;
+    } else {
+      c.classList.add('hidden-by-filter');
+    }
+  }
+  // 清掉之前的 no-match 提示
+  const oldEmpty = root.querySelector('.no-match');
+  if (oldEmpty) oldEmpty.remove();
+  if (q && shown === 0) {
+    const div = document.createElement('div');
+    div.className = 'no-match';
+    div.textContent = `no city matches "${q}"`;
+    root.appendChild(div);
+  }
+}
+
+document.querySelectorAll('.city-filter').forEach(input => {
+  input.addEventListener('input', () => applyFilter(input.dataset.tab));
+});
 
 // 首次加载所有 Tab（即使隐藏也加载，切到时直接显示）
 loadTab('forecast');
