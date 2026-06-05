@@ -46,17 +46,19 @@ const METAR_BASE = 'https://aviationweather.gov/api/data/metar';
  */
 class WeatherObservationsCollector extends BaseCollector {
     constructor() {
-        // 基础 tick = 10s（= METAR 节奏）
-        // 注：METAR 每个站点真实更新约每小时一次（SPECI 异常报除外），
-        // 10s 远超 aviationweather.gov "1 req/min per thread" 建议，
-        // 但因为 batch 一次拉所有站，全局 6 req/min «« 100 req/min 上限，所以仍然安全。
+        // 基础 tick 默认 10s，但 fetch() 里会根据当前城市数动态决定本轮真实间隔
+        // 避免 1 分钟内的 METAR 请求量超过 aviationweather.gov 的 100 req/min 上限。
+        // METAR 真值每站约每小时才更新一次（SPECI 异常报除外），不需要追求 10s 极限。
         super('weather_observations', 10 * 1000);
         this.targets = [];
         this.tick = 0;
-        // Settlement 每 N 个 tick 跑一次（12 × 10s = 120s = 2 分钟）
+        // Settlement 每 N 个 tick 跑一次（默认 12 × 10s = 120s = 2 分钟）
+        // 同样会被动态 tick 间隔影响：城市多时实际 settlement 周期会按比例拉长
         this.settlementEveryTicks = 12;
         // 启动时立刻跑一遍 settlement（不等 2 分钟）
         this.settlementOffset = 1;
+        // 速率上限（留 10% safety margin）
+        this.metarRateLimitPerMin = 90;
     }
 
     sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -141,7 +143,9 @@ class WeatherObservationsCollector extends BaseCollector {
             let resp;
             try {
                 resp = await axios.get(url, {
-                    timeout: 15000,
+                    // 8s 超时：单 chunk 慢不能拖垮整轮 tick（46 城 16 chunk 串行，
+                    // 15s × 16 worst case = 4 min，严重影响实时性）
+                    timeout: 8000,
                     headers: {
                         'User-Agent': 'news-tracker/1.0 (contact: openclaw-agent)',
                         'Accept': 'application/json'
@@ -543,6 +547,21 @@ class WeatherObservationsCollector extends BaseCollector {
         if (this.targets.length === 0) {
             logger.warn('⚠️ [Obs] no cities configured, skipping tick');
             return null;
+        }
+
+        // 按城市数动态调 tick 间隔，把 METAR 总请求量压在 rateLimit 以下
+        //   chunks per tick = ceil(N / CHUNK_SIZE)
+        //   req/min = chunks * (60 / tickSec)
+        //   解 tickSec: tickSec >= chunks * 60 / rateLimit
+        // 同时 floor 在 10s（不会比原始预期更快）
+        const CHUNK_SIZE = 3;   // 与 fetchMetarBatch 里一致
+        const chunks = Math.ceil(this.targets.length / CHUNK_SIZE);
+        const desiredSec = Math.max(10, Math.ceil(chunks * 60 / this.metarRateLimitPerMin));
+        const desiredMs = desiredSec * 1000;
+        if (this.intervalMs !== desiredMs) {
+            logger.info(`[Obs] tick interval ${this.intervalMs / 1000}s → ${desiredSec}s `
+                + `(cities=${this.targets.length}, chunks=${chunks}, ~${chunks * 60 / desiredSec | 0} req/min)`);
+            this.intervalMs = desiredMs;
         }
 
         // 每个 tick 都跑 METAR
