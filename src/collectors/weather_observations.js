@@ -112,30 +112,56 @@ class WeatherObservationsCollector extends BaseCollector {
 
     /**
      * Batch 拉取所有站点的 METAR，最近 72 小时
-     * 72 小时是为了完整覆盖任意时区（含极端 UTC-12 ~ UTC+14）的"昨天"全部观测：
-     * 在 UTC-12 时区，"昨天 00:00" 距当前 UTC 最多可达 24h(昨天) + 24h(今天) + 12h(偏移) = 60h
-     * 用 72h 留余量。响应仅多~50% 数据量（仍是 KB 级），对带宽和限流都没影响。
+     *
+     * 关键细节：aviationweather.gov 单次响应硬上限是 400 条 entries。
+     * 一个城市 72h 平均 ~72 条（每小时一条），坏天气 + SPECI 异常报可飙到 130+
+     * （实测 RKSI/EGLC/ZBAA 都达到这个数量级，相当于半小时一报）。
+     * 取 chunk size = 3：3 × ~130 max ≈ 390 条，留 ~10 条余量低于 400 上限。
+     * （实测 5/chunk 触顶 400，4/chunk 在 RKSI+EGLC 同组时也触顶）
+     *
+     * 把站点切成多个 chunk 串行发请求；与 ratelimit 的关系：
+     *   假设 20 城市 → 7 chunks per cycle，10s 一轮 → 42 req/min « 100/min 上限。
+     *
+     * 72h 窗口是为了完整覆盖任意时区（含极端 UTC-12 ~ UTC+14）的"昨天"全部观测：
+     * 在 UTC-12 时区，"昨天 00:00" 距当前 UTC 最多可达 24h(昨天) + 24h(今天) + 12h(偏移) = 60h。
+     *
      * 返回 Map<icaoId, [{obsTime, temp, raw}, ...]>
      */
     async fetchMetarBatch(stations) {
-        const url = `${METAR_BASE}?ids=${stations.join(',')}&format=json&hours=72`;
-        const resp = await axios.get(url, {
-            timeout: 15000,
-            headers: {
-                'User-Agent': 'news-tracker/1.0 (contact: openclaw-agent)',
-                'Accept': 'application/json'
-            },
-            proxy: false   // 跟 NPM 同坑：绕开本地 HTTPS_PROXY
-        });
+        const CHUNK_SIZE = 3;      // 3 站 × 72h max~130/站 ≈ 390 条，刚够压在 400 上限内
+        const CHUNK_GAP_MS = 200;  // chunk 之间小间隔，避免突发
+
         const byStation = new Map();
-        if (!Array.isArray(resp.data)) return byStation;
-        for (const e of resp.data) {
-            const id = e?.icaoId;
-            const t = e?.temp;            // 始终 Celsius
-            const ts = e?.obsTime;        // unix seconds
-            if (!id || typeof t !== 'number' || typeof ts !== 'number') continue;
-            if (!byStation.has(id)) byStation.set(id, []);
-            byStation.get(id).push({ obsTime: ts, temp: t, raw: e.rawOb || '' });
+        for (let i = 0; i < stations.length; i += CHUNK_SIZE) {
+            const chunk = stations.slice(i, i + CHUNK_SIZE);
+            const url = `${METAR_BASE}?ids=${chunk.join(',')}&format=json&hours=72`;
+            let resp;
+            try {
+                resp = await axios.get(url, {
+                    timeout: 15000,
+                    headers: {
+                        'User-Agent': 'news-tracker/1.0 (contact: openclaw-agent)',
+                        'Accept': 'application/json'
+                    },
+                    proxy: false   // 跟 NPM 同坑：绕开本地 HTTPS_PROXY
+                });
+            } catch (e) {
+                const status = e?.response?.status;
+                logger.warn(`❌ [METAR] chunk ${chunk.join(',')} failed: ${status || ''} ${e.message}`);
+                continue;   // 单 chunk 失败不影响其他 chunk
+            }
+            if (!Array.isArray(resp.data)) continue;
+            for (const e of resp.data) {
+                const id = e?.icaoId;
+                const t = e?.temp;            // 始终 Celsius
+                const ts = e?.obsTime;        // unix seconds
+                if (!id || typeof t !== 'number' || typeof ts !== 'number') continue;
+                if (!byStation.has(id)) byStation.set(id, []);
+                byStation.get(id).push({ obsTime: ts, temp: t, raw: e.rawOb || '' });
+            }
+            if (i + CHUNK_SIZE < stations.length) {
+                await new Promise(r => setTimeout(r, CHUNK_GAP_MS));
+            }
         }
         return byStation;
     }
