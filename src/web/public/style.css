@@ -109,8 +109,82 @@ main { padding: 16px 24px 32px; }
   font-style: italic;
 }
 
-/* Observations: 日期分隔行（today / yesterday 块的开头） */
-tr.date-divider td { background: #21262d; padding: 4px 10px; color: #8b949e; font-size: 11px; }
+/* Observations: 日期块 */
+.date-section {
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+.date-section-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: #21262d;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid #30363d;
+}
+.date-section-header:hover { background: #2d333b; }
+.date-section-header .caret { color: #8b949e; font-size: 10px; min-width: 12px; }
+.date-section-header .date-label { color: #c9d1d9; font-weight: 500; font-size: 12px; font-family: "SF Mono", Menlo, monospace; }
+.date-section-header .hint { color: #6e7681; font-size: 10px; margin-left: auto; font-style: italic; }
+
+.obs-summary { border: none; }
+.obs-summary th, .obs-summary td { border: none; border-bottom: 1px solid #30363d; vertical-align: top; }
+.obs-summary tbody tr:last-child td { border-bottom: none; }
+.obs-summary th small { display: block; font-weight: 400; font-size: 9px; text-transform: none; letter-spacing: 0; color: #6e7681; margin-top: 1px; }
+
+.obs-cell { display: flex; flex-direction: column; gap: 1px; line-height: 1.3; }
+.obs-cell .obs-temp { color: #c9d1d9; font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
+.obs-cell .obs-meta { color: #8b949e; font-size: 10px; }
+
+/* Observations: 展开的明细面板 */
+.obs-detail-pane {
+  background: #0d1117;
+  padding: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.detail-block {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.detail-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #21262d;
+  font-size: 11px;
+  color: #8b949e;
+  border-bottom: 1px solid #30363d;
+}
+.detail-table { font-size: 11px; }
+.detail-table th, .detail-table td { border-color: #21262d; }
+.detail-row-high td { background: rgba(248, 81, 73, 0.08); }
+.detail-row-high td:first-child { box-shadow: inset 3px 0 0 #f85149; }
+.detail-row-low td { background: rgba(88, 166, 255, 0.08); }
+.detail-row-low td:first-child { box-shadow: inset 3px 0 0 #58a6ff; }
+
+.mini-tag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.mini-tag-high { background: rgba(248, 81, 73, 0.2); color: #f85149; }
+.mini-tag-low  { background: rgba(88, 166, 255, 0.2); color: #58a6ff; }
+
+@media (max-width: 900px) {
+  .obs-detail-pane { grid-template-columns: 1fr; }
+}
 
 .card {
   background: #161b22;
