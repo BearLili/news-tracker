@@ -139,6 +139,38 @@ main { padding: 16px 24px 32px; }
 .obs-cell { display: flex; flex-direction: column; gap: 1px; line-height: 1.3; }
 .obs-cell .obs-temp { color: #c9d1d9; font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
 .obs-cell .obs-meta { color: #8b949e; font-size: 10px; }
+.tz-tag {
+  display: inline-block;
+  padding: 0 4px;
+  margin-left: 3px;
+  border-radius: 6px;
+  background: rgba(139, 148, 158, 0.15);
+  color: #6e7681;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+/* yesterday 默认整段折叠：仅显示标题 header，summary 和 detail 都隐藏 */
+.date-section.is-yesterday-collapsed .obs-summary,
+.date-section.is-yesterday-collapsed .obs-detail-pane {
+  display: none;
+}
+.date-section.is-yesterday-collapsed { opacity: 0.65; }
+.date-section.is-yesterday-collapsed:hover { opacity: 1; }
+.date-section.is-yesterday-collapsed .date-section-header { border-bottom: none; }
+
+/* 顶部时区 legend */
+.time-legend {
+  color: #8b949e;
+  font-size: 11px;
+  padding: 4px 10px;
+  background: rgba(33, 38, 45, 0.6);
+  border-radius: 4px;
+  margin-left: auto;
+}
+.time-legend strong { color: #c9d1d9; }
 
 /* Observations: 展开的明细面板
  * 注意：`display: grid` 会覆盖 hidden 属性的原生 display:none，

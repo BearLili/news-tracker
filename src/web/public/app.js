@@ -17,14 +17,44 @@ const escape = s => String(s ?? '').replace(/[&<>"']/g, c => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[c]));
 
+// 浏览器本地时间（用户视角，用于 "seen" / "first_seen_at" / "last_check_at" 等"我们什么时候看到的"）
 const fmtTs = (ms) => {
   if (!ms) return '—';
   const d = new Date(Number(ms));
   if (isNaN(d.getTime())) return '—';
   return d.toLocaleString();
 };
-
 const fmtTsSec = (sec) => fmtTs(sec ? sec * 1000 : null);
+
+// 城市本地时间（数据视角，用于 "obs_ts" / detail 表里的"这条观测在哪个时刻"）
+// tz 形如 'Asia/Shanghai' / 'Europe/London' / 'America/New_York'
+const CITY_TIME_FMT_CACHE = new Map();
+function getCityFmt(tz) {
+  if (!CITY_TIME_FMT_CACHE.has(tz)) {
+    try {
+      CITY_TIME_FMT_CACHE.set(tz, new Intl.DateTimeFormat('zh-CN', {
+        timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false
+      }));
+    } catch {
+      CITY_TIME_FMT_CACHE.set(tz, null);
+    }
+  }
+  return CITY_TIME_FMT_CACHE.get(tz);
+}
+function fmtCityTimeSec(unixSec, tz) {
+  if (!unixSec || !tz) return fmtTsSec(unixSec);
+  const fmt = getCityFmt(tz);
+  if (!fmt) return fmtTsSec(unixSec);
+  try { return fmt.format(new Date(Number(unixSec) * 1000)); }
+  catch { return fmtTsSec(unixSec); }
+}
+
+// 用户本地时区名（用于 legend 显示，让用户清楚 "seen" 是哪个时区）
+const USER_TZ = (() => {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'; }
+  catch { return 'local'; }
+})();
 
 const fmtIv = (n) => {
   const x = Number(n);
@@ -123,82 +153,92 @@ function renderObservations(root, data) {
           ${escape(city.name)} <small>${escape(city.station)} · ${escape(city.unit)} · local ${escape(local_now)}</small>
         </div>
       </div>
-      ${dateBlock(city.station, 'today', todayDate, city.unit, settlement.today, metar.today)}
-      ${dateBlock(city.station, 'yesterday', yesterdayDate, city.unit, settlement.yesterday, metar.yesterday)}
+      ${dateBlock(city.station, 'today', todayDate, city.unit, city.tz, settlement.today, metar.today)}
+      ${dateBlock(city.station, 'yesterday', yesterdayDate, city.unit, city.tz, settlement.yesterday, metar.yesterday)}
     </div>`;
   }).join('');
 }
 
 /**
  * 一个日期块：可点击 header + 摘要表（settlement / metar 各一行）+ 隐藏的明细面板
+ * yesterday 默认整段折叠（仅显示标题），用户点击展开 summary + detail；today 默认 summary 可见，
+ * detail 仍在 pane 里通过同一个点击切换
  */
-function dateBlock(station, when, dateStr, unit, settlementData, metarData) {
+function dateBlock(station, when, dateStr, unit, tz, settlementData, metarData) {
   const label = dateStr ? `${dateStr} · ${when}` : when;
-  // 三段 stateKey 避免不同城市的 today 块状态串扰
   const stateKey = `${station}|${when}|${dateStr || ''}`;
-  const expanded = expandedSections.has(stateKey);
-  const caret = expanded ? '▼' : '▶';
-  const hidden = expanded ? '' : 'hidden';
+  const userExpanded = expandedSections.has(stateKey);
+  // yesterday：用户没主动展开过 → 整段折叠（is-yesterday-collapsed）
+  const yesterdayCollapsed = when === 'yesterday' && !userExpanded;
+  const caret = userExpanded ? '▼' : '▶';
+  const paneHidden = !userExpanded;
+  const sectionCls = [
+    'date-section',
+    when === 'yesterday' ? 'is-yesterday' : 'is-today',
+    yesterdayCollapsed ? 'is-yesterday-collapsed' : ''
+  ].filter(Boolean).join(' ');
+  const hintText = yesterdayCollapsed
+    ? '点击展开 yesterday'
+    : (userExpanded ? '点击折叠' : '点击查看 detail');
 
   return `
-    <div class="date-section">
-      <div class="date-section-header" onclick="toggleSection(this, '${escape(stateKey)}')">
+    <div class="${sectionCls}">
+      <div class="date-section-header" onclick="toggleSection(this, '${escape(stateKey)}', '${escape(when)}')">
         <span class="caret">${caret}</span>
         <span class="date-label">${escape(label)}</span>
-        <small class="hint">${expanded ? 'click to collapse' : 'click to view observation detail'}</small>
+        <small class="hint">${hintText}</small>
       </div>
       <table class="obs-summary">
         <thead>
           <tr>
             <th>Source</th>
-            <th>High <small>@ obs · first seen</small></th>
-            <th>Low <small>@ obs · first seen</small></th>
-            <th>Latest <small>@ obs · first seen</small></th>
+            <th>High <small>@ city local · seen 你的本地</small></th>
+            <th>Low <small>@ city local · seen 你的本地</small></th>
+            <th>Latest <small>@ city local · seen 你的本地</small></th>
             <th>Obs#</th>
           </tr>
         </thead>
         <tbody>
-          ${obsRow('settlement', unit, settlementData)}
-          ${obsRow('metar', unit, metarData)}
+          ${obsRow('settlement', unit, tz, settlementData)}
+          ${obsRow('metar', unit, tz, metarData)}
         </tbody>
       </table>
-      <div class="obs-detail-pane" ${hidden}>
-        ${detailSection('settlement', unit, settlementData)}
-        ${detailSection('metar', unit, metarData)}
+      <div class="obs-detail-pane" ${paneHidden ? 'hidden' : ''}>
+        ${detailSection('settlement', unit, tz, settlementData)}
+        ${detailSection('metar', unit, tz, metarData)}
       </div>
     </div>
   `;
 }
 
-/** 一个 high/low/latest 单元格：温度 + 观测时间 + 我们首次看到的时间 */
-function obsCell(value, unit, obsTs, firstSeenAt) {
+/** 一个 high/low/latest 单元格：温度 + 观测时间(城市本地) + 我们首次看到的时间(你本地) */
+function obsCell(value, unit, obsTs, firstSeenAt, tz) {
   if (value === null || value === undefined || value === '') return '<span class="dash">—</span>';
-  const obsTime = obsTs ? fmtTsSec(Number(obsTs)) : '—';
+  const obsTime = obsTs ? fmtCityTimeSec(Number(obsTs), tz) : '—';
   const seen = firstSeenAt ? fmtTs(firstSeenAt) : '—';
   return `<div class="obs-cell">
     <span class="obs-temp">${escape(value)}°${escape(unit)}</span>
-    <small class="obs-meta">@ ${escape(obsTime)}</small>
-    <small class="obs-meta">seen ${escape(seen)}</small>
+    <small class="obs-meta">@ ${escape(obsTime)} <span class="tz-tag">city</span></small>
+    <small class="obs-meta">seen ${escape(seen)} <span class="tz-tag">you</span></small>
   </div>`;
 }
 
-function obsRow(type, unit, d) {
+function obsRow(type, unit, tz, d) {
   const tag = `<span class="tag tag-${type}">${type}</span>`;
-  // 显式判 null/undefined/空串，避免 0°C 被误判为 no data
   if (!d || d.high === undefined || d.high === '' || d.high === null) {
     return `<tr><td>${tag}</td><td colspan="4" class="dash">no data</td></tr>`;
   }
   return `<tr>
     <td>${tag}</td>
-    <td>${obsCell(d.high, unit, d.high_obs_ts, d.high_first_seen_at)}</td>
-    <td>${obsCell(d.low, unit, d.low_obs_ts, d.low_first_seen_at)}</td>
-    <td>${obsCell(d.latest_temp, unit, d.latest_obs_ts, d.latest_first_seen_at)}</td>
+    <td>${obsCell(d.high, unit, d.high_obs_ts, d.high_first_seen_at, tz)}</td>
+    <td>${obsCell(d.low, unit, d.low_obs_ts, d.low_first_seen_at, tz)}</td>
+    <td>${obsCell(d.latest_temp, unit, d.latest_obs_ts, d.latest_first_seen_at, tz)}</td>
     <td class="value-num">${escape(d.obs_count || 0)}</td>
   </tr>`;
 }
 
 /** 展开后的单个 source 的全量观测列表 */
-function detailSection(type, unit, d) {
+function detailSection(type, unit, tz, d) {
   if (!d || !d.detail || d.detail.length === 0) {
     return `<div class="detail-block">
       <div class="detail-title"><span class="tag tag-${type}">${type}</span></div>
@@ -207,13 +247,12 @@ function detailSection(type, unit, d) {
   }
   const high = d.high !== undefined && d.high !== '' ? Number(d.high) : null;
   const low  = d.low  !== undefined && d.low  !== '' ? Number(d.low)  : null;
-  // 倒序（最新的在上）
   const rows = d.detail.slice().reverse().map(o => {
     const isHi = high !== null && o.temp === high;
     const isLo = low  !== null && o.temp === low;
     const cls = isHi ? 'detail-row-high' : (isLo ? 'detail-row-low' : '');
     return `<tr class="${cls}">
-      <td>${fmtTsSec(o.ts)}</td>
+      <td>${fmtCityTimeSec(o.ts, tz)}</td>
       <td class="value-num">${escape(o.temp)}°${escape(unit)}</td>
       <td>${isHi ? '<span class="mini-tag mini-tag-high">HIGH</span>' : (isLo ? '<span class="mini-tag mini-tag-low">LOW</span>' : '')}</td>
     </tr>`;
@@ -222,7 +261,7 @@ function detailSection(type, unit, d) {
   return `<div class="detail-block">
     <div class="detail-title">
       <span class="tag tag-${type}">${type}</span>
-      <small>${d.detail.length} observations (newest first)</small>
+      <small>${d.detail.length} observations · city local time · newest first</small>
     </div>
     <table class="detail-table">
       <thead><tr><th>Obs Time</th><th>Temp</th><th></th></tr></thead>
@@ -231,24 +270,40 @@ function detailSection(type, unit, d) {
   </div>`;
 }
 
-function toggleSection(headerEl, stateKey) {
+function toggleSection(headerEl, stateKey, when) {
   const section = headerEl.parentElement;
   const pane = section.querySelector('.obs-detail-pane');
   const caret = headerEl.querySelector('.caret');
   const hint = headerEl.querySelector('.hint');
+
+  // Yesterday 折叠状态 → 整体展开（summary + detail 一起亮）
+  if (section.classList.contains('is-yesterday-collapsed')) {
+    section.classList.remove('is-yesterday-collapsed');
+    if (pane) pane.hidden = false;
+    expandedSections.add(stateKey);
+    if (caret) caret.textContent = '▼';
+    if (hint) hint.textContent = '点击折叠';
+    return;
+  }
+
+  // 今天 或 已展开的 yesterday：切换 detail
   if (pane.hidden) {
     pane.hidden = false;
     caret.textContent = '▼';
-    if (hint) hint.textContent = 'click to collapse';
+    if (hint) hint.textContent = '点击折叠';
     expandedSections.add(stateKey);
   } else {
     pane.hidden = true;
     caret.textContent = '▶';
-    if (hint) hint.textContent = 'click to view observation detail';
+    if (hint) hint.textContent = '点击查看 detail';
     expandedSections.delete(stateKey);
+    // yesterday 收起 detail 时同时把整段重新折回
+    if (when === 'yesterday') {
+      section.classList.add('is-yesterday-collapsed');
+      if (hint) hint.textContent = '点击展开 yesterday';
+    }
   }
 }
-// 让 inline onclick 能拿到
 window.toggleSection = toggleSection;
 
 // =====================
@@ -375,6 +430,10 @@ document.querySelectorAll('.city-filter').forEach(input => {
   input.addEventListener('input', () => applyFilter(input.dataset.tab));
 });
 
+// 在 legend 里显示用户的时区
+const userTzEl = document.getElementById('user-tz');
+if (userTzEl) userTzEl.textContent = `(${USER_TZ})`;
+
 // 首次加载所有 Tab（即使隐藏也加载，切到时直接显示）
 loadTab('forecast');
 loadTab('observations');
@@ -386,12 +445,13 @@ loadTab('npm');
 const tickerBar = document.getElementById('ticker-bar');
 const toastStack = document.getElementById('toast-stack');
 
-// 走马灯节流：保证连续两条 ticker 至少间隔 N 毫秒，避免多个事件同时挤进 DOM 堆叠
-// 用 animation-delay 让元素在 DOM 里等待自己的"出场时间"，不阻塞主线程
-// 当前 ticker 只展示"新高温/新低温"这类强信号事件，本身很稀疏，3s 间隔足够避免
-// 不同宽度 item 在 18s 动画里相互重叠（94 px/s × 3s = 282px gap，覆盖典型 item 宽度）
-const TICKER_MIN_GAP_MS = 3000;
-const TICKER_MAX_DELAY_MS = 30000;  // 排队超过 30s 直接丢弃（事件太陈旧）
+// 走马灯节流：用元素实际宽度算出"上一条完全清出右边后再放下一条"的最小间隔
+// 公式：item 的右边缘移出 viewport 需要 (animDur × itemW / (vw + itemW)) ms
+// 加 200ms 安全缓冲；外加 TICKER_MIN_GAP_MS 保底（窄 item 也不至于一闪而过）
+const TICKER_ANIM_DURATION_MS = 18000;  // 必须与 CSS keyframe ticker-slide 一致
+const TICKER_MIN_GAP_MS = 1500;          // 最小间隔保底
+const TICKER_BUFFER_MS = 200;            // 视觉缓冲
+const TICKER_MAX_DELAY_MS = 30000;       // 排队 >30s 丢弃
 let tickerNextStartAt = 0;
 
 function addTickerItem(cls, html) {
@@ -399,8 +459,7 @@ function addTickerItem(cls, html) {
   const now = Date.now();
   const desiredStart = Math.max(now, tickerNextStartAt);
   const delayMs = desiredStart - now;
-  if (delayMs > TICKER_MAX_DELAY_MS) return;  // 排队太久跳过
-  tickerNextStartAt = desiredStart + TICKER_MIN_GAP_MS;
+  if (delayMs > TICKER_MAX_DELAY_MS) return;
 
   const el = document.createElement('div');
   el.className = 'ticker-item ' + (cls || '');
@@ -408,6 +467,13 @@ function addTickerItem(cls, html) {
   if (delayMs > 0) el.style.animationDelay = `${delayMs}ms`;
   tickerBar.appendChild(el);
   el.addEventListener('animationend', () => el.remove(), { once: true });
+
+  // 测量实际宽度，按"上一条 item 右边缘完全离开右边界"算下一条最早出场时间
+  const w = el.offsetWidth;
+  const vw = window.innerWidth || 1400;
+  const clearMs = TICKER_ANIM_DURATION_MS * w / (vw + w);
+  const gap = Math.max(TICKER_MIN_GAP_MS, clearMs + TICKER_BUFFER_MS);
+  tickerNextStartAt = desiredStart + gap;
 }
 
 function addToast(opts) {

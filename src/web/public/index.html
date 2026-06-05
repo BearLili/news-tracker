@@ -29,6 +29,10 @@
       <input type="search" class="city-filter" data-tab="observations" placeholder="🔍 filter by city or station…">
       <span id="observations-updated" class="updated">loading…</span>
       <button onclick="loadTab('observations')">↻ refresh</button>
+      <span class="time-legend">
+        <strong>city</strong> = 城市本地时间（数据观测时刻） ·
+        <strong>you</strong> = 你的本地时间 <span id="user-tz"></span>（我们收到 / 看到的时刻）
+      </span>
     </div>
     <div id="observations-content"></div>
   </section>
