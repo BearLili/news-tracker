@@ -162,9 +162,13 @@ class WeatherObservationsCollector extends BaseCollector {
             };
             const slot = byDate[d];
             slot.count++;
-            // 严格 >，让"最早达到该极值"的观测胜出（同温取最早）
-            if (o.temp > slot.highC) { slot.highC = o.temp; slot.highObsTs = o.obsTime; }
-            if (o.temp < slot.lowC)  { slot.lowC  = o.temp; slot.lowObsTs  = o.obsTime; }
+            // 严格 > 或同温取最早（避免依赖 TWC/NOAA 返回顺序导致 highObsTs flapping）
+            if (o.temp > slot.highC || (o.temp === slot.highC && o.obsTime < slot.highObsTs)) {
+                slot.highC = o.temp; slot.highObsTs = o.obsTime;
+            }
+            if (o.temp < slot.lowC || (o.temp === slot.lowC && o.obsTime < slot.lowObsTs)) {
+                slot.lowC = o.temp; slot.lowObsTs = o.obsTime;
+            }
             if (o.obsTime > slot.latestObsTs) {
                 slot.latestObsTs = o.obsTime;
                 slot.latestC = o.temp;
@@ -300,8 +304,13 @@ class WeatherObservationsCollector extends BaseCollector {
             };
             const slot = byDate[d];
             slot.count++;
-            if (t > slot.high) { slot.high = t; slot.highObsTs = ts; }
-            if (t < slot.low)  { slot.low  = t; slot.lowObsTs  = ts; }
+            // 严格 > 或同温取最早，避免依赖 TWC 返回顺序
+            if (t > slot.high || (t === slot.high && ts < slot.highObsTs)) {
+                slot.high = t; slot.highObsTs = ts;
+            }
+            if (t < slot.low || (t === slot.low && ts < slot.lowObsTs)) {
+                slot.low = t; slot.lowObsTs = ts;
+            }
             if (ts > slot.latestObsTs) { slot.latestObsTs = ts; slot.latestTemp = t; }
             if (slot.firstObsTs === 0 || ts < slot.firstObsTs) slot.firstObsTs = ts;
             slot.detail.push({ ts, temp: t });
@@ -405,29 +414,38 @@ class WeatherObservationsCollector extends BaseCollector {
                 obs_count: info.count,
                 first_obs_ts: info.firstObsTs || '',
                 last_obs_ts: info.lastObsTs,
-                updated_at: nowMs
+                updated_at: nowMs,
+                // 始终同步 obs_ts 字段：消除 stale（老数据迁移、TWC 数据回退、窗口滑动等场景）
+                // 这样 summary 显示的"高温对应的观测时间"会跟 detail 高亮的那条永远一致
+                high_obs_ts: info.highObsTs || '',
+                low_obs_ts: info.lowObsTs || '',
+                latest_obs_ts: info.latestObsTs || '',
             };
             if (info.lastRaw) payload.last_raw = info.lastRaw;
+            if (info.latestTemp !== null && info.latestTemp !== undefined) {
+                payload.latest_temp = info.latestTemp;
+            }
 
             // 首次创建 hash 时记录 first_seen_at
             if (!existing.first_seen_at) payload.first_seen_at = nowMs;
 
-            // high 变化（首次 OR 严格更高）→ 重新记录 high_obs_ts + first_seen
+            // first_seen_at 三连：分两种情况
+            //   1) 严格升降 (high > prev / low < prev / latest 推进)：刷新成现在
+            //   2) 老数据没有这个 first_seen 字段（PR #16 留下的 stale 数据）：用现在 backfill 一次
+            //      之后稳态再不动，所以"我们首次见到这个值的时间"语义就建立起来了
             if (prevHigh === null || info.high > prevHigh) {
-                payload.high_obs_ts = info.highObsTs || '';
+                payload.high_first_seen_at = nowMs;
+            } else if (!existing.high_first_seen_at) {
                 payload.high_first_seen_at = nowMs;
             }
-            // low 变化（首次 OR 严格更低）→ 同理
             if (prevLow === null || info.low < prevLow) {
-                payload.low_obs_ts = info.lowObsTs || '';
+                payload.low_first_seen_at = nowMs;
+            } else if (!existing.low_first_seen_at) {
                 payload.low_first_seen_at = nowMs;
             }
-            // 有新观测进来（latest_obs_ts 推进）→ 更新 latest_*
             if (info.latestObsTs > prevLatestObsTs) {
-                if (info.latestTemp !== null && info.latestTemp !== undefined) {
-                    payload.latest_temp = info.latestTemp;
-                }
-                payload.latest_obs_ts = info.latestObsTs;
+                payload.latest_first_seen_at = nowMs;
+            } else if (!existing.latest_first_seen_at && info.latestObsTs > 0) {
                 payload.latest_first_seen_at = nowMs;
             }
 
