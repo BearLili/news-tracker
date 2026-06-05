@@ -140,7 +140,10 @@ main { padding: 16px 24px 32px; }
 .obs-cell .obs-temp { color: #c9d1d9; font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
 .obs-cell .obs-meta { color: #8b949e; font-size: 10px; }
 
-/* Observations: 展开的明细面板 */
+/* Observations: 展开的明细面板
+ * 注意：`display: grid` 会覆盖 hidden 属性的原生 display:none，
+ * 所以必须显式补一条 [hidden] 规则——否则点击切换看不到任何效果。
+ */
 .obs-detail-pane {
   background: #0d1117;
   padding: 10px;
@@ -148,6 +151,7 @@ main { padding: 16px 24px 32px; }
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
+.obs-detail-pane[hidden] { display: none; }
 .detail-block {
   background: #161b22;
   border: 1px solid #30363d;
