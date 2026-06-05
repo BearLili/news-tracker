@@ -381,7 +381,118 @@ loadTab('observations');
 loadTab('npm');
 
 // =====================
-// SSE：服务端推变化，前端按 channel 刷新对应 Tab
+// 通知：底部走马灯 + 右上角醒目 toast
+// =====================
+const tickerBar = document.getElementById('ticker-bar');
+const toastStack = document.getElementById('toast-stack');
+
+function addTickerItem(cls, html) {
+  if (!tickerBar) return;
+  const el = document.createElement('div');
+  el.className = 'ticker-item ' + (cls || '');
+  el.innerHTML = html;
+  tickerBar.appendChild(el);
+  el.addEventListener('animationend', () => el.remove());
+}
+
+function addToast(opts) {
+  if (!toastStack) return;
+  const el = document.createElement('div');
+  el.className = 'toast' + (opts.cls ? ' ' + opts.cls : '');
+  el.innerHTML = `
+    <div class="toast-row1">${escape(opts.row1)}</div>
+    <div class="toast-row2">${opts.row2 /* trusted html, already escaped upstream */}</div>
+    ${opts.row3 ? `<div class="toast-row3">${escape(opts.row3)}</div>` : ''}
+  `;
+  toastStack.appendChild(el);
+  const ttl = opts.ttl || 9000;
+  let t = setTimeout(removeToast, ttl);
+  function removeToast() {
+    el.classList.add('removing');
+    el.addEventListener('animationend', () => el.remove(), { once: true });
+  }
+  el.addEventListener('click', () => { clearTimeout(t); removeToast(); });
+}
+
+function handleWeatherObsUpdate(u) {
+  // 用 Number() 兜底字符串/数字混合
+  const high = u.high === null || u.high === undefined ? null : Number(u.high);
+  const prevHigh = u.prev_high === null || u.prev_high === undefined ? null : Number(u.prev_high);
+  const low = u.low === null || u.low === undefined ? null : Number(u.low);
+  const prevLow = u.prev_low === null || u.prev_low === undefined ? null : Number(u.prev_low);
+  const latestTemp = u.latest_temp === null || u.latest_temp === undefined ? null : Number(u.latest_temp);
+  const prevLatestTemp = u.prev_latest_temp === null || u.prev_latest_temp === undefined ? null : Number(u.prev_latest_temp);
+
+  const isNewHigh = prevHigh !== null && high !== null && high > prevHigh;
+  const isNewLow  = prevLow  !== null && low  !== null && low  < prevLow;
+  const latestChanged = latestTemp !== null && (prevLatestTemp === null || latestTemp !== prevLatestTemp);
+
+  // 完全没有有意义变化（比如只是 obs_count++）则跳过
+  if (!isNewHigh && !isNewLow && !latestChanged) return;
+
+  const city = `${escape(u.name || u.station)} <small>(${escape(u.station)} · ${escape(u.type)})</small>`;
+  const u_ = escape(u.unit || '');
+
+  // 1) 走马灯条目
+  let tickerCls = 'ticker-item-update';
+  let icon = '📡';
+  let info = `latest <strong>${escape(latestTemp)}°${u_}</strong>`;
+  if (isNewHigh) {
+    tickerCls = 'ticker-item-high'; icon = '🔥 NEW HIGH';
+    info = `high <strong>${escape(prevHigh)}° → ${escape(high)}°${u_}</strong>`;
+  } else if (isNewLow) {
+    tickerCls = 'ticker-item-low'; icon = '❄️ NEW LOW';
+    info = `low <strong>${escape(prevLow)}° → ${escape(low)}°${u_}</strong>`;
+  }
+  addTickerItem(tickerCls, `<span class="ticker-icon">${icon}</span><span class="ticker-city">${city}</span> · <span class="ticker-info">${info}</span>`);
+
+  // 2) 新高温/新低温：醒目 toast（高温更明显）
+  if (isNewHigh) {
+    addToast({
+      cls: '',
+      row1: `🔥 NEW HIGH · ${u.type}`,
+      row2: `${escape(u.name || u.station)} <span style="opacity:0.7">(${escape(u.station)})</span>`,
+      row3: `${prevHigh}°${u.unit} → ${high}°${u.unit} · ${u.date}`,
+      ttl: 12000,
+    });
+  } else if (isNewLow) {
+    addToast({
+      cls: 'toast-low',
+      row1: `❄️ NEW LOW · ${u.type}`,
+      row2: `${escape(u.name || u.station)} <span style="opacity:0.7">(${escape(u.station)})</span>`,
+      row3: `${prevLow}°${u.unit} → ${low}°${u.unit} · ${u.date}`,
+      ttl: 8000,
+    });
+  }
+}
+
+function handleNpmUpdate(u) {
+  const iv = u.implied_valuation ? Number(u.implied_valuation) : null;
+  const prevIv = u.prev_iv ? Number(u.prev_iv) : null;
+  let info = '';
+  if (iv !== null && prevIv !== null) {
+    const d = (iv - prevIv) / 1e9;
+    const pct = prevIv ? (d * 1e9 / prevIv * 100) : 0;
+    const sign = d >= 0 ? '+' : '';
+    info = `IV <strong>${fmtIv(prevIv)} → ${fmtIv(iv)}</strong> (${sign}${d.toFixed(2)}B / ${sign}${pct.toFixed(2)}%)`;
+  } else if (iv !== null) {
+    info = `IV <strong>${fmtIv(iv)}</strong>`;
+  }
+  const reasonIcon = u.reason === 'new_date' ? '💰' : (u.reason === 'same_date_iv_correction' ? '✏️' : '🆕');
+  const city = `${escape(u.name || u.companyId)} <small>(${escape(u.date || '')})</small>`;
+  addTickerItem('ticker-item-npm', `<span class="ticker-icon">${reasonIcon}</span><span class="ticker-city">${city}</span> · <span class="ticker-info">${info}</span>`);
+}
+
+function handleForecastUpdate() {
+  addTickerItem('ticker-item-forecast', `<span class="ticker-icon">🔮</span><span class="ticker-city">forecast refreshed</span>`);
+}
+
+function parseSseData(raw) {
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+// =====================
+// SSE：服务端推变化，触发刷新 + 通知
 // =====================
 const sseEl = document.getElementById('sse-status');
 function connectSSE() {
@@ -394,10 +505,20 @@ function connectSSE() {
     sseEl.textContent = 'disconnected, retrying…';
     sseEl.className = 'disconnected';
   };
-  // 收到 collector 推送时，重新拉对应 API（保持渲染逻辑统一）
-  evt.addEventListener('weather_obs', () => loadTab('observations'));
-  evt.addEventListener('npm_pricing', () => loadTab('npm'));
-  evt.addEventListener('weather_forecast_4days', () => loadTab('forecast'));
+  evt.addEventListener('weather_obs', (e) => {
+    const msg = parseSseData(e.data);
+    if (msg?.data?.updates) for (const u of msg.data.updates) handleWeatherObsUpdate(u);
+    loadTab('observations');
+  });
+  evt.addEventListener('npm_pricing', (e) => {
+    const msg = parseSseData(e.data);
+    if (msg?.data?.updates) for (const u of msg.data.updates) handleNpmUpdate(u);
+    loadTab('npm');
+  });
+  evt.addEventListener('weather_forecast_4days', () => {
+    handleForecastUpdate();
+    loadTab('forecast');
+  });
   return evt;
 }
 connectSSE();

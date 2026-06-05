@@ -427,10 +427,16 @@ class WeatherObservationsCollector extends BaseCollector {
                 ? Number(existing.obs_count) : 0;
             const prevLatestObsTs = existing.latest_obs_ts !== undefined && existing.latest_obs_ts !== ''
                 ? Number(existing.latest_obs_ts) : 0;
+            const prevLatestTemp = existing.latest_temp !== undefined && existing.latest_temp !== ''
+                ? Number(existing.latest_temp) : null;
+
+            const latestTempChanged = info.latestTemp !== null && info.latestTemp !== undefined
+                && (prevLatestTemp === null || Number(info.latestTemp) !== prevLatestTemp);
 
             const changed = (prevHigh !== info.high)
                          || (prevLow !== info.low)
-                         || (info.count > prevCount);
+                         || (info.count > prevCount)
+                         || latestTempChanged;
 
             const payload = {
                 station: target.station,
@@ -499,6 +505,12 @@ class WeatherObservationsCollector extends BaseCollector {
                     low: info.low,
                     prev_high: prevHigh,
                     prev_low: prevLow,
+                    latest_temp: info.latestTemp,
+                    prev_latest_temp: prevLatestTemp,
+                    latest_obs_ts: info.latestObsTs,
+                    prev_latest_obs_ts: prevLatestObsTs,
+                    high_obs_ts: info.highObsTs,
+                    low_obs_ts: info.lowObsTs,
                     obs_count: info.count,
                     prev_count: prevCount,
                     first_obs_ts: info.firstObsTs || null,

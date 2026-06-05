@@ -40,6 +40,12 @@
     <div id="npm-content"></div>
   </section>
 </main>
+<!-- 右上角醒目 toast 栈：仅"新高温"等高优先级事件 -->
+<div id="toast-stack" aria-live="polite"></div>
+
+<!-- 底部走马灯：所有 SSE 更新事件从右往左滚 -->
+<div id="ticker-bar" aria-live="polite"></div>
+
 <script src="/app.js"></script>
 </body>
 </html>

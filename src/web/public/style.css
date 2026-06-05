@@ -298,3 +298,116 @@ td.value-num { text-align: right; font-variant-numeric: tabular-nums; }
 @media (max-width: 760px) {
   .npm-grid { grid-template-columns: 1fr; }
 }
+
+/* =====================
+ * 底部走马灯（所有更新事件）
+ * ===================== */
+#ticker-bar {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  height: 32px;
+  background: rgba(13, 17, 23, 0.92);
+  border-top: 1px solid #30363d;
+  overflow: hidden;
+  z-index: 100;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.ticker-item {
+  position: absolute;
+  top: 0; left: 100%;
+  line-height: 32px;
+  padding: 0 18px;
+  white-space: nowrap;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  color: #c9d1d9;
+  animation: ticker-slide 18s linear forwards;
+  will-change: transform;
+}
+.ticker-item .ticker-icon { margin-right: 6px; }
+.ticker-item .ticker-city { color: #c9d1d9; font-weight: 600; }
+.ticker-item .ticker-city small { color: #8b949e; font-weight: 400; margin-left: 4px; }
+.ticker-item .ticker-info { color: #8b949e; margin-left: 4px; }
+.ticker-item .ticker-info strong { color: #c9d1d9; }
+
+.ticker-item-high {
+  color: #f85149;
+  font-weight: 700;
+  text-shadow: 0 0 8px rgba(248, 81, 73, 0.45);
+}
+.ticker-item-high .ticker-info strong { color: #f85149; }
+.ticker-item-low { color: #58a6ff; font-weight: 700; }
+.ticker-item-low .ticker-info strong { color: #58a6ff; }
+.ticker-item-npm { color: #d2a8ff; }
+.ticker-item-npm .ticker-info strong { color: #d2a8ff; }
+.ticker-item-forecast { color: #f0883e; }
+
+@keyframes ticker-slide {
+  from { transform: translateX(0); }
+  to   { transform: translateX(calc(-100vw - 100%)); }
+}
+
+/* main 底部留点空给走马灯，避免被遮 */
+main { padding-bottom: 48px; }
+
+/* =====================
+ * 右上角醒目 toast（仅新高温等高优先级）
+ * ===================== */
+#toast-stack {
+  position: fixed;
+  top: 80px; right: 16px;
+  display: flex; flex-direction: column;
+  gap: 10px;
+  z-index: 200;
+  max-width: 380px;
+  pointer-events: none;
+}
+.toast {
+  background: linear-gradient(180deg, #b62324 0%, #8b1a1b 100%);
+  border-left: 4px solid #f85149;
+  border-radius: 6px;
+  padding: 12px 16px;
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-weight: 600;
+  box-shadow: 0 6px 24px rgba(248, 81, 73, 0.35), 0 2px 6px rgba(0, 0, 0, 0.4);
+  animation: toast-in 0.32s cubic-bezier(0.4, 0, 0.2, 1) both;
+  pointer-events: auto;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.toast::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 4px;
+  background: #ffd0cf;
+  box-shadow: 0 0 8px #f85149;
+  animation: toast-pulse 1.4s ease-in-out infinite;
+}
+.toast.removing { animation: toast-out 0.28s ease-in forwards; }
+.toast .toast-row1 {
+  font-size: 11px; font-weight: 700; letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #ffd0cf;
+  margin-bottom: 3px;
+}
+.toast .toast-row2 { font-size: 15px; }
+.toast .toast-row3 {
+  font-size: 11px; opacity: 0.85; margin-top: 2px;
+  font-weight: 400;
+  font-family: "SF Mono", Menlo, monospace;
+}
+.toast.toast-low {
+  background: linear-gradient(180deg, #1f4280 0%, #163058 100%);
+  border-left-color: #58a6ff;
+  box-shadow: 0 6px 24px rgba(88, 166, 255, 0.3), 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.toast.toast-low::before { background: #cfe2ff; box-shadow: 0 0 8px #58a6ff; }
+.toast.toast-low .toast-row1 { color: #cfe2ff; }
+@keyframes toast-in  { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes toast-out { from { opacity: 1; transform: translateX(0); }    to { opacity: 0; transform: translateX(50px); } }
+@keyframes toast-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
