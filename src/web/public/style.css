@@ -1,0 +1,193 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  background: #0d1117;
+  color: #c9d1d9;
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+header h1 { font-size: 16px; font-weight: 600; }
+
+#sse-status {
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  background: #21262d;
+  font-variant-numeric: tabular-nums;
+}
+#sse-status::before { content: "● "; }
+#sse-status.connected { background: rgba(63, 185, 80, 0.2); color: #3fb950; }
+#sse-status.disconnected { background: rgba(248, 81, 73, 0.2); color: #f85149; }
+
+nav {
+  display: flex;
+  padding: 0 24px;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  position: sticky;
+  top: 49px;
+  z-index: 10;
+}
+
+.tab-btn {
+  padding: 12px 18px;
+  background: none;
+  border: none;
+  color: #8b949e;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color .15s, border-color .15s;
+}
+.tab-btn:hover { color: #c9d1d9; }
+.tab-btn.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
+main { padding: 16px 24px 32px; }
+
+.tab { display: none; }
+.tab.active { display: block; }
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: #8b949e;
+}
+.meta button {
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.meta button:hover { background: #30363d; border-color: #58a6ff; }
+
+.card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.card-title {
+  font-weight: 600;
+  color: #c9d1d9;
+  font-size: 14px;
+}
+.card-title small {
+  color: #8b949e;
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: normal;
+  font-family: "SF Mono", Menlo, monospace;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+th, td {
+  padding: 5px 10px;
+  text-align: left;
+  border: 1px solid #30363d;
+  white-space: nowrap;
+}
+th {
+  background: #21262d;
+  color: #8b949e;
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+td.value-num { text-align: right; font-variant-numeric: tabular-nums; }
+.dash { color: #6e7681; }
+
+.tag {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.tag-settlement { background: rgba(63, 185, 80, 0.2); color: #3fb950; }
+.tag-metar { background: rgba(88, 166, 255, 0.2); color: #58a6ff; }
+
+/* NPM card */
+.npm-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr 1fr 1fr;
+  gap: 14px;
+  align-items: center;
+}
+.npm-iv-big {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 26px;
+  font-weight: 600;
+  color: #c9d1d9;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.5px;
+}
+.npm-sub { color: #8b949e; font-size: 11px; margin-top: 2px; }
+.npm-cell-label { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.npm-cell-value {
+  font-family: "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  margin-top: 4px;
+}
+.delta-up { color: #3fb950; }
+.delta-down { color: #f85149; }
+.delta-flat { color: #8b949e; }
+
+.empty {
+  padding: 32px;
+  text-align: center;
+  color: #6e7681;
+  font-style: italic;
+}
+
+@keyframes flash {
+  0% { background-color: rgba(88, 166, 255, 0.35); }
+  100% { background-color: transparent; }
+}
+.flash { animation: flash 1.2s ease-out; }
+
+@media (max-width: 760px) {
+  .npm-grid { grid-template-columns: 1fr; }
+}

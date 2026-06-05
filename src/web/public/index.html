@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>news-tracker · collectors</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>📊 news-tracker</h1>
+  <div id="sse-status" class="disconnected">connecting…</div>
+</header>
+<nav>
+  <button class="tab-btn active" data-tab="forecast">🔮 Forecast (4-day)</button>
+  <button class="tab-btn" data-tab="observations">📡 Observations</button>
+  <button class="tab-btn" data-tab="npm">💰 NPM Pricing</button>
+</nav>
+<main>
+  <section id="tab-forecast" class="tab active">
+    <div class="meta">
+      <span id="forecast-updated" class="updated">loading…</span>
+      <button onclick="loadTab('forecast')">↻ refresh</button>
+    </div>
+    <div id="forecast-content"></div>
+  </section>
+  <section id="tab-observations" class="tab">
+    <div class="meta">
+      <span id="observations-updated" class="updated">loading…</span>
+      <button onclick="loadTab('observations')">↻ refresh</button>
+    </div>
+    <div id="observations-content"></div>
+  </section>
+  <section id="tab-npm" class="tab">
+    <div class="meta">
+      <span id="npm-updated" class="updated">loading…</span>
+      <button onclick="loadTab('npm')">↻ refresh</button>
+    </div>
+    <div id="npm-content"></div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
