@@ -46,12 +46,16 @@ const METAR_BASE = 'https://aviationweather.gov/api/data/metar';
  */
 class WeatherObservationsCollector extends BaseCollector {
     constructor() {
-        super('weather_observations', 60 * 1000); // 基础 tick = 60s（= METAR 节奏）
+        // 基础 tick = 10s（= METAR 节奏）
+        // 注：METAR 每个站点真实更新约每小时一次（SPECI 异常报除外），
+        // 10s 远超 aviationweather.gov "1 req/min per thread" 建议，
+        // 但因为 batch 一次拉所有站，全局 6 req/min «« 100 req/min 上限，所以仍然安全。
+        super('weather_observations', 10 * 1000);
         this.targets = [];
         this.tick = 0;
-        // Settlement 每 N 个 tick 跑一次（默认 10 → 10 分钟）
-        this.settlementEveryTicks = 10;
-        // 启动时立刻跑一遍 settlement（不等 10 分钟）
+        // Settlement 每 N 个 tick 跑一次（12 × 10s = 120s = 2 分钟）
+        this.settlementEveryTicks = 12;
+        // 启动时立刻跑一遍 settlement（不等 2 分钟）
         this.settlementOffset = 1;
     }
 

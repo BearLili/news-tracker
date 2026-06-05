@@ -12,6 +12,7 @@ import WeatherFlowPlusCollector from './collectors/weather_flow_plus.js';
 import WeatherSettlementCollector from './collectors/weather_settlement.js';
 import WeatherObservationsCollector from './collectors/weather_observations.js';
 import NPMPricingCollector from './collectors/npm_pricing.js';
+import { startWebServer, stopWebServer } from './web/server.js';
 
 
 // 在这里注册所有启用的采集器
@@ -40,20 +41,30 @@ async function main() {
     });
   }
 
+  // 启动 Web 可视化（同进程，仅本机访问）
+  // 设置 WEB_DISABLED=true 可禁用（例如 headless 部署只跑采集器）
+  if (process.env.WEB_DISABLED !== 'true') {
+    try { await startWebServer(); }
+    catch (e) { logger.error(`Failed to start web server: ${e.message}`); }
+  }
+
   // 优雅退出处理
   const shutdown = async (signal) => {
     logger.info(`Received ${signal}, shutting down...`);
-    
+
     // 1. 停止所有采集循环
     collectors.forEach(c => c.stop());
-    
-    // 2. 等待 pending 的请求完成 (简单等待几秒)
+
+    // 2. 关闭 Web 服务
+    await stopWebServer().catch(() => {});
+
+    // 3. 等待 pending 的请求完成 (简单等待几秒)
     // 更好的做法是 BaseCollector 内部维护一个 promise
     await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    // 3. 断开 Redis 连接
+
+    // 4. 断开 Redis 连接
     await redis.quit();
-    
+
     logger.info('Cleanup finished. Bye.');
     process.exit(0);
   };
