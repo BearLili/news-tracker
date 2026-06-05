@@ -133,7 +133,11 @@ class WeatherObservationsCollector extends BaseCollector {
         const byStation = new Map();
         for (let i = 0; i < stations.length; i += CHUNK_SIZE) {
             const chunk = stations.slice(i, i + CHUNK_SIZE);
-            const url = `${METAR_BASE}?ids=${chunk.join(',')}&format=json&hours=48`;
+            // _t cache-buster：aviationweather.gov 走 Azure Front Door，
+            // cache-control: max-age=60 + 边缘节点缓存不一致会导致 1~3 分钟实时延迟。
+            // 每次带不同 _t 强制 CDN MISS 回源，让 10s 节奏真正生效。
+            // 代价：origin 负载稍增；24 req/min « 100/min 上限仍合规。
+            const url = `${METAR_BASE}?ids=${chunk.join(',')}&format=json&hours=48&_t=${Date.now()}`;
             let resp;
             try {
                 resp = await axios.get(url, {
