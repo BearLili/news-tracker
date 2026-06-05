@@ -386,13 +386,26 @@ loadTab('npm');
 const tickerBar = document.getElementById('ticker-bar');
 const toastStack = document.getElementById('toast-stack');
 
+// 走马灯节流：保证连续两条 ticker 至少间隔 N 毫秒，避免多个事件同时挤进 DOM 堆叠
+// 用 animation-delay 让元素在 DOM 里等待自己的"出场时间"，不阻塞主线程
+const TICKER_MIN_GAP_MS = 1500;  // 每条至少间隔 1.5s 出场
+const TICKER_MAX_DELAY_MS = 30000;  // 排队超过 30s 直接丢弃（事件太陈旧）
+let tickerNextStartAt = 0;
+
 function addTickerItem(cls, html) {
   if (!tickerBar) return;
+  const now = Date.now();
+  const desiredStart = Math.max(now, tickerNextStartAt);
+  const delayMs = desiredStart - now;
+  if (delayMs > TICKER_MAX_DELAY_MS) return;  // 排队太久跳过
+  tickerNextStartAt = desiredStart + TICKER_MIN_GAP_MS;
+
   const el = document.createElement('div');
   el.className = 'ticker-item ' + (cls || '');
   el.innerHTML = html;
+  if (delayMs > 0) el.style.animationDelay = `${delayMs}ms`;
   tickerBar.appendChild(el);
-  el.addEventListener('animationend', () => el.remove());
+  el.addEventListener('animationend', () => el.remove(), { once: true });
 }
 
 function addToast(opts) {
