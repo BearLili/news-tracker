@@ -83,6 +83,35 @@ main { padding: 16px 24px 32px; }
 }
 .meta button:hover { background: #30363d; border-color: #58a6ff; }
 
+.city-filter {
+  background: #0d1117;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  min-width: 260px;
+  flex: 0 0 auto;
+}
+.city-filter:focus {
+  outline: none;
+  border-color: #58a6ff;
+}
+.city-filter::placeholder { color: #6e7681; }
+
+.card.hidden-by-filter { display: none; }
+
+.no-match {
+  padding: 24px;
+  text-align: center;
+  color: #6e7681;
+  font-style: italic;
+}
+
+/* Observations: 日期分隔行（today / yesterday 块的开头） */
+tr.date-divider td { background: #21262d; padding: 4px 10px; color: #8b949e; font-size: 11px; }
+
 .card {
   background: #161b22;
   border: 1px solid #30363d;

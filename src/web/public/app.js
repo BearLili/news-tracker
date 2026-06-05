@@ -62,7 +62,7 @@ function renderForecast(root, data) {
     return;
   }
   root.innerHTML = data.cities.map(({ city, days }) => `
-    <div class="card" data-station="${escape(city.station)}">
+    <div class="card" data-station="${escape(city.station)}" data-name="${escape((city.name || '').toLowerCase())}">
       <div class="card-header">
         <div class="card-title">
           ${escape(city.name)} <small>${escape(city.station)} · ${escape(city.unit)} · ${escape(city.tz)}</small>
@@ -109,8 +109,15 @@ function renderObservations(root, data) {
     root.innerHTML = '<div class="empty">no cities configured</div>';
     return;
   }
-  root.innerHTML = data.cities.map(({ city, local_now, settlement, metar }) => `
-    <div class="card" data-station="${escape(city.station)}">
+  // 按"城市 → 日期 → 源"分组：每个城市卡片内部，今天和昨天各一个块，
+  // 块内 settlement 和 metar 上下并排，方便对比同日两路数据
+  root.innerHTML = data.cities.map(({ city, local_now, settlement, metar }) => {
+    // 从两路数据里捞出实际日期字符串（settlement / metar 都用同一对 today/yesterday）
+    const today = (settlement.today?.date) || (metar.today?.date) || '';
+    const yesterday = (settlement.yesterday?.date) || (metar.yesterday?.date) || '';
+
+    return `
+    <div class="card" data-station="${escape(city.station)}" data-name="${escape((city.name || '').toLowerCase())}">
       <div class="card-header">
         <div class="card-title">
           ${escape(city.name)} <small>${escape(city.station)} · ${escape(city.unit)} · local ${escape(local_now)}</small>
@@ -119,38 +126,54 @@ function renderObservations(root, data) {
       <table>
         <thead>
           <tr>
-            <th>Source</th>
             <th>Date</th>
+            <th>Source</th>
             <th>High</th>
             <th>Low</th>
             <th>Obs#</th>
+            <th>First Obs</th>
             <th>Last Obs</th>
+            <th>First Seen</th>
           </tr>
         </thead>
         <tbody>
-          ${obsRow('settlement', city.unit, settlement.yesterday)}
-          ${obsRow('settlement', city.unit, settlement.today)}
-          ${obsRow('metar', city.unit, metar.yesterday)}
-          ${obsRow('metar', city.unit, metar.today)}
+          ${dateBlock('today', today, city.unit, settlement.today, metar.today)}
+          ${dateBlock('yesterday', yesterday, city.unit, settlement.yesterday, metar.yesterday)}
         </tbody>
       </table>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
+}
+
+/**
+ * 一个日期块：表头 divider + 同日 settlement / metar 两行
+ */
+function dateBlock(when, dateStr, unit, settlementData, metarData) {
+  const label = dateStr ? `${dateStr} · ${when}` : when;
+  return `
+    <tr class="date-divider"><td colspan="8">${escape(label)}</td></tr>
+    ${obsRow('settlement', unit, settlementData)}
+    ${obsRow('metar', unit, metarData)}
+  `;
 }
 
 function obsRow(type, unit, d) {
   const tag = `<span class="tag tag-${type}">${type}</span>`;
   if (!d || Object.keys(d).length === 0) {
-    return `<tr><td>${tag}</td><td colspan="5" class="dash">no data</td></tr>`;
+    return `<tr><td class="dash">—</td><td>${tag}</td><td colspan="6" class="dash">no data</td></tr>`;
   }
   const lastObs = d.last_obs_ts ? fmtTsSec(Number(d.last_obs_ts)) : '—';
+  const firstObs = d.first_obs_ts ? fmtTsSec(Number(d.first_obs_ts)) : '—';
+  const firstSeen = d.first_seen_at ? fmtTs(d.first_seen_at) : '—';
   return `<tr>
+    <td></td>
     <td>${tag}</td>
-    <td>${escape(d.date)}</td>
     <td class="value-num">${escape(d.high)}°${escape(unit)}</td>
     <td class="value-num">${escape(d.low)}°${escape(unit)}</td>
     <td class="value-num">${escape(d.obs_count)}</td>
+    <td>${firstObs}</td>
     <td>${lastObs}</td>
+    <td>${firstSeen}</td>
   </tr>`;
 }
 
@@ -226,6 +249,8 @@ async function loadTab(name) {
     const root = document.getElementById(name + '-content');
     RENDERERS[name](root, data);
     setUpdated(name);
+    // 渲染后重新应用当前 filter
+    applyFilter(name);
     // 闪一下当前激活的 tab，表示刚刷新
     const tab = document.getElementById('tab-' + name);
     if (tab && tab.classList.contains('active')) flash(tab);
@@ -234,6 +259,47 @@ async function loadTab(name) {
     if (root) root.innerHTML = `<div class="empty" style="color:#f85149">error: ${escape(e.message)}</div>`;
   }
 }
+
+// =====================
+// 城市过滤
+// =====================
+function applyFilter(tabName) {
+  const input = document.querySelector(`.city-filter[data-tab="${tabName}"]`);
+  if (!input) return;
+  const q = (input.value || '').trim().toLowerCase();
+  const root = document.getElementById(tabName + '-content');
+  if (!root) return;
+  const cards = root.querySelectorAll('.card');
+  let shown = 0;
+  for (const c of cards) {
+    if (!q) {
+      c.classList.remove('hidden-by-filter');
+      shown++;
+      continue;
+    }
+    const station = (c.dataset.station || '').toLowerCase();
+    const name = (c.dataset.name || '').toLowerCase();
+    if (station.includes(q) || name.includes(q)) {
+      c.classList.remove('hidden-by-filter');
+      shown++;
+    } else {
+      c.classList.add('hidden-by-filter');
+    }
+  }
+  // 清掉之前的 no-match 提示
+  const oldEmpty = root.querySelector('.no-match');
+  if (oldEmpty) oldEmpty.remove();
+  if (q && shown === 0) {
+    const div = document.createElement('div');
+    div.className = 'no-match';
+    div.textContent = `no city matches "${q}"`;
+    root.appendChild(div);
+  }
+}
+
+document.querySelectorAll('.city-filter').forEach(input => {
+  input.addEventListener('input', () => applyFilter(input.dataset.tab));
+});
 
 // 首次加载所有 Tab（即使隐藏也加载，切到时直接显示）
 loadTab('forecast');

@@ -144,17 +144,23 @@ class WeatherObservationsCollector extends BaseCollector {
      * METAR 数据是 Celsius，按 target.unit 转换 + 按 target.tz 聚合到本地日 high/low
      * 仅保留 dates 内的日期（避免远日观测污染）
      */
+    // 注意：firstObsTs 语义是"当前 72h 窗口里能见到的最早 obsTime"，
+    // 一旦最早那条观测滑出 72h 窗口，firstObsTs 会向后跳——不是"该日历日的首条观测时间"。
+    // 想要绝对意义的"该日首条观测"，需要用 Redis hash 持久化 min 累积（暂未做）。
     aggregateMetarByDate(obsList, target, validDates) {
         const byDate = {};
         for (const o of obsList) {
             const d = this.toLocalDate(o.obsTime, target.tz);
             if (!validDates.includes(d)) continue;
-            if (!byDate[d]) byDate[d] = { temps: [], count: 0, lastObsTs: 0, lastRaw: '' };
+            if (!byDate[d]) byDate[d] = { temps: [], count: 0, lastObsTs: 0, firstObsTs: 0, lastRaw: '' };
             byDate[d].temps.push(o.temp);
             byDate[d].count++;
             if (o.obsTime > byDate[d].lastObsTs) {
                 byDate[d].lastObsTs = o.obsTime;
                 byDate[d].lastRaw = o.raw || '';
+            }
+            if (byDate[d].firstObsTs === 0 || o.obsTime < byDate[d].firstObsTs) {
+                byDate[d].firstObsTs = o.obsTime;
             }
         }
         const result = {};
@@ -165,6 +171,7 @@ class WeatherObservationsCollector extends BaseCollector {
                 high: target.unit === 'F' ? this.cToF(highC) : Math.round(highC),
                 low:  target.unit === 'F' ? this.cToF(lowC)  : Math.round(lowC),
                 count: info.count,
+                firstObsTs: info.firstObsTs,
                 lastObsTs: info.lastObsTs,
                 lastRaw: info.lastRaw
             };
@@ -263,10 +270,11 @@ class WeatherObservationsCollector extends BaseCollector {
             if (typeof t !== 'number' || typeof ts !== 'number') continue;
             const d = this.toLocalDate(ts, target.tz);
             if (!valid.includes(d)) continue;
-            if (!byDate[d]) byDate[d] = { temps: [], count: 0, lastObsTs: 0 };
+            if (!byDate[d]) byDate[d] = { temps: [], count: 0, lastObsTs: 0, firstObsTs: 0 };
             byDate[d].temps.push(t);
             byDate[d].count++;
             if (ts > byDate[d].lastObsTs) byDate[d].lastObsTs = ts;
+            if (byDate[d].firstObsTs === 0 || ts < byDate[d].firstObsTs) byDate[d].firstObsTs = ts;
         }
         const result = {};
         for (const [d, info] of Object.entries(byDate)) {
@@ -275,6 +283,7 @@ class WeatherObservationsCollector extends BaseCollector {
                 high: Math.round(Math.max(...info.temps)),
                 low: Math.round(Math.min(...info.temps)),
                 count: info.count,
+                firstObsTs: info.firstObsTs,
                 lastObsTs: info.lastObsTs
             };
         }
@@ -341,10 +350,16 @@ class WeatherObservationsCollector extends BaseCollector {
                 high: info.high,
                 low: info.low,
                 obs_count: info.count,
+                first_obs_ts: info.firstObsTs || '',
                 last_obs_ts: info.lastObsTs,
                 updated_at: nowMs
             };
             if (info.lastRaw) payload.last_raw = info.lastRaw;
+            // first_seen_at 只在 key 首次出现时记录，后续保持不变
+            // （existing.first_seen_at 为空字符串/undefined 都视为"未设置"）
+            if (!existing.first_seen_at) {
+                payload.first_seen_at = nowMs;
+            }
 
             await redis.hset(key, payload);
             await redis.expire(key, 14 * 24 * 60 * 60);
@@ -362,7 +377,9 @@ class WeatherObservationsCollector extends BaseCollector {
                     prev_low: prevLow,
                     obs_count: info.count,
                     prev_count: prevCount,
+                    first_obs_ts: info.firstObsTs || null,
                     last_obs_ts: info.lastObsTs,
+                    first_seen_at: existing.first_seen_at ? Number(existing.first_seen_at) : nowMs,
                 });
             }
         }
