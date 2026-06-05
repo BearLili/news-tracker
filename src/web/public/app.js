@@ -388,7 +388,9 @@ const toastStack = document.getElementById('toast-stack');
 
 // 走马灯节流：保证连续两条 ticker 至少间隔 N 毫秒，避免多个事件同时挤进 DOM 堆叠
 // 用 animation-delay 让元素在 DOM 里等待自己的"出场时间"，不阻塞主线程
-const TICKER_MIN_GAP_MS = 1500;  // 每条至少间隔 1.5s 出场
+// 当前 ticker 只展示"新高温/新低温"这类强信号事件，本身很稀疏，3s 间隔足够避免
+// 不同宽度 item 在 18s 动画里相互重叠（94 px/s × 3s = 282px gap，覆盖典型 item 宽度）
+const TICKER_MIN_GAP_MS = 3000;
 const TICKER_MAX_DELAY_MS = 30000;  // 排队超过 30s 直接丢弃（事件太陈旧）
 let tickerNextStartAt = 0;
 
@@ -438,22 +440,20 @@ function handleWeatherObsUpdate(u) {
 
   const isNewHigh = prevHigh !== null && high !== null && high > prevHigh;
   const isNewLow  = prevLow  !== null && low  !== null && low  < prevLow;
-  const latestChanged = latestTemp !== null && (prevLatestTemp === null || latestTemp !== prevLatestTemp);
 
-  // 完全没有有意义变化（比如只是 obs_count++）则跳过
-  if (!isNewHigh && !isNewLow && !latestChanged) return;
+  // 走马灯只关心"新高/新低"这种强信号，其他（latest_temp 变化、obs_count++）不展示
+  // 避免事件密度过高导致 ticker 堆叠
+  if (!isNewHigh && !isNewLow) return;
 
   const city = `${escape(u.name || u.station)} <small>(${escape(u.station)} · ${escape(u.type)})</small>`;
   const u_ = escape(u.unit || '');
 
   // 1) 走马灯条目
-  let tickerCls = 'ticker-item-update';
-  let icon = '📡';
-  let info = `latest <strong>${escape(latestTemp)}°${u_}</strong>`;
+  let tickerCls, icon, info;
   if (isNewHigh) {
     tickerCls = 'ticker-item-high'; icon = '🔥 NEW HIGH';
     info = `high <strong>${escape(prevHigh)}° → ${escape(high)}°${u_}</strong>`;
-  } else if (isNewLow) {
+  } else {
     tickerCls = 'ticker-item-low'; icon = '❄️ NEW LOW';
     info = `low <strong>${escape(prevLow)}° → ${escape(low)}°${u_}</strong>`;
   }
@@ -479,26 +479,10 @@ function handleWeatherObsUpdate(u) {
   }
 }
 
-function handleNpmUpdate(u) {
-  const iv = u.implied_valuation ? Number(u.implied_valuation) : null;
-  const prevIv = u.prev_iv ? Number(u.prev_iv) : null;
-  let info = '';
-  if (iv !== null && prevIv !== null) {
-    const d = (iv - prevIv) / 1e9;
-    const pct = prevIv ? (d * 1e9 / prevIv * 100) : 0;
-    const sign = d >= 0 ? '+' : '';
-    info = `IV <strong>${fmtIv(prevIv)} → ${fmtIv(iv)}</strong> (${sign}${d.toFixed(2)}B / ${sign}${pct.toFixed(2)}%)`;
-  } else if (iv !== null) {
-    info = `IV <strong>${fmtIv(iv)}</strong>`;
-  }
-  const reasonIcon = u.reason === 'new_date' ? '💰' : (u.reason === 'same_date_iv_correction' ? '✏️' : '🆕');
-  const city = `${escape(u.name || u.companyId)} <small>(${escape(u.date || '')})</small>`;
-  addTickerItem('ticker-item-npm', `<span class="ticker-icon">${reasonIcon}</span><span class="ticker-city">${city}</span> · <span class="ticker-info">${info}</span>`);
-}
-
-function handleForecastUpdate() {
-  addTickerItem('ticker-item-forecast', `<span class="ticker-icon">🔮</span><span class="ticker-city">forecast refreshed</span>`);
-}
+// NPM / Forecast 更新当前不进 ticker（仅触发 Tab 刷新）
+// 想要回来时，把对应 ticker 调用加回这里即可
+function handleNpmUpdate(_u) { /* noop */ }
+function handleForecastUpdate() { /* noop */ }
 
 function parseSseData(raw) {
   try { return JSON.parse(raw); } catch { return null; }
