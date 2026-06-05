@@ -2,6 +2,7 @@ import axios from 'axios';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
+import pLimit from 'p-limit';
 import BaseCollector from '../core/BaseCollector.js';
 import redis from '../core/redis.js';
 import logger from '../utils/logger.js';
@@ -46,19 +47,21 @@ const METAR_BASE = 'https://aviationweather.gov/api/data/metar';
  */
 class WeatherObservationsCollector extends BaseCollector {
     constructor() {
-        // 基础 tick 默认 10s，但 fetch() 里会根据当前城市数动态决定本轮真实间隔
-        // 避免 1 分钟内的 METAR 请求量超过 aviationweather.gov 的 100 req/min 上限。
-        // METAR 真值每站约每小时才更新一次（SPECI 异常报除外），不需要追求 10s 极限。
-        super('weather_observations', 10 * 1000);
+        // tick = 5s（高频策略要求每城 5s 内拿到最新 METAR）
+        // 单 IP 100 req/min 上限靠 proxy 池摊匀：46 城 × 16 chunks × 12 tick/min = 192 req/min
+        // 平均到 10 个 proxy = 每 IP ~19 req/min，远低于任何合理 per-IP 限制
+        super('weather_observations', 5 * 1000);
         this.targets = [];
         this.tick = 0;
-        // Settlement 每 N 个 tick 跑一次（默认 12 × 10s = 120s = 2 分钟）
-        // 同样会被动态 tick 间隔影响：城市多时实际 settlement 周期会按比例拉长
-        this.settlementEveryTicks = 12;
-        // 启动时立刻跑一遍 settlement（不等 2 分钟）
+        // Settlement 每 24 tick 跑一次 = 24 × 5s = 120s = 2 分钟
+        this.settlementEveryTicks = 24;
         this.settlementOffset = 1;
-        // 速率上限（留 10% safety margin）
-        this.metarRateLimitPerMin = 90;
+        // METAR 并发：4 个 chunk 同时拉，~500ms 一批，16 chunks 约 2-4s 完成（在 5s tick 内）
+        this.metarConcurrency = 4;
+        // Settlement 并发：城市数多 + 串行慢，用 proxy 并发摊
+        this.settlementConcurrency = 8;
+        // Proxy 池快照（每 tick 开始时刷新一次）
+        this.proxyPool = [];
     }
 
     sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -97,15 +100,31 @@ class WeatherObservationsCollector extends BaseCollector {
         try {
             const s = await redis.srandmember('poly:proxylist');
             if (!s) return null;
-            const p = s.split(':');
-            if (p.length < 2) return null;
-            return {
-                protocol: 'http',
-                host: p[0],
-                port: parseInt(p[1]),
-                auth: (p[2] && p[3]) ? { username: p[2], password: p[3] } : undefined
-            };
+            return this._parseProxy(s);
         } catch { return null; }
+    }
+
+    _parseProxy(s) {
+        const p = s.split(':');
+        if (p.length < 2) return null;
+        return {
+            protocol: 'http',
+            host: p[0],
+            port: parseInt(p[1]),
+            auth: (p[2] && p[3]) ? { username: p[2], password: p[3] } : undefined
+        };
+    }
+
+    /** 拉全部 proxy 列表（不是随机一个），用于轮转分配给并发请求 */
+    async loadProxyPool() {
+        try {
+            const list = await redis.smembers('poly:proxylist');
+            this.proxyPool = list.map(s => this._parseProxy(s)).filter(Boolean);
+        } catch (e) {
+            logger.warn(`[Obs] loadProxyPool failed: ${e.message}`);
+            this.proxyPool = [];
+        }
+        return this.proxyPool;
     }
 
     // =====================
@@ -129,47 +148,54 @@ class WeatherObservationsCollector extends BaseCollector {
      * 返回 Map<icaoId, [{obsTime, temp, raw}, ...]>
      */
     async fetchMetarBatch(stations) {
-        const CHUNK_SIZE = 3;      // 3 站 × 48h max~95/站 ≈ 285 条，远低于 400 上限
-        const CHUNK_GAP_MS = 200;  // chunk 之间小间隔，避免突发
+        const CHUNK_SIZE = 3;  // 3 站 × 48h max~95/站 ≈ 285 条，远低于 400 上限
 
-        const byStation = new Map();
+        // 把 stations 切成 chunks 列表
+        const chunkList = [];
         for (let i = 0; i < stations.length; i += CHUNK_SIZE) {
-            const chunk = stations.slice(i, i + CHUNK_SIZE);
-            // _t cache-buster：aviationweather.gov 走 Azure Front Door，
-            // cache-control: max-age=60 + 边缘节点缓存不一致会导致 1~3 分钟实时延迟。
-            // 每次带不同 _t 强制 CDN MISS 回源，让 10s 节奏真正生效。
-            // 代价：origin 负载稍增；24 req/min « 100/min 上限仍合规。
+            chunkList.push(stations.slice(i, i + CHUNK_SIZE));
+        }
+
+        // 并发拉取 + proxy 轮转分配
+        // chunk i 用 proxyPool[i % proxyPool.length] —— 保证同一 tick 内每个 proxy
+        // 承担均衡的请求数；多 tick 累计后也是 round-robin 等量分配
+        const proxies = this.proxyPool;
+        const limit = pLimit(this.metarConcurrency);
+        const byStation = new Map();
+        let failed = 0;
+
+        await Promise.all(chunkList.map((chunk, idx) => limit(async () => {
+            const proxyConfig = proxies.length > 0 ? proxies[idx % proxies.length] : null;
+            const proxyTag = proxyConfig ? proxyConfig.host : 'direct';
+            // _t cache-buster：绕开 Azure Front Door 边缘缓存，每次回源
             const url = `${METAR_BASE}?ids=${chunk.join(',')}&format=json&hours=48&_t=${Date.now()}`;
-            let resp;
             try {
-                resp = await axios.get(url, {
-                    // 8s 超时：单 chunk 慢不能拖垮整轮 tick（46 城 16 chunk 串行，
-                    // 15s × 16 worst case = 4 min，严重影响实时性）
-                    timeout: 8000,
+                const resp = await axios.get(url, {
+                    // 6s 超时：在 5s tick 节奏里给一点余量；快失败让下一轮 retry
+                    timeout: 6000,
                     headers: {
                         'User-Agent': 'news-tracker/1.0 (contact: openclaw-agent)',
                         'Accept': 'application/json'
                     },
-                    proxy: false   // 跟 NPM 同坑：绕开本地 HTTPS_PROXY
+                    proxy: proxyConfig || false   // 没 proxy 时直连
                 });
+                if (!Array.isArray(resp.data)) return;
+                for (const e of resp.data) {
+                    const id = e?.icaoId;
+                    const t = e?.temp;
+                    const ts = e?.obsTime;
+                    if (!id || typeof t !== 'number' || typeof ts !== 'number') continue;
+                    if (!byStation.has(id)) byStation.set(id, []);
+                    byStation.get(id).push({ obsTime: ts, temp: t, raw: e.rawOb || '' });
+                }
             } catch (e) {
+                failed++;
                 const status = e?.response?.status;
-                logger.warn(`❌ [METAR] chunk ${chunk.join(',')} failed: ${status || ''} ${e.message}`);
-                continue;   // 单 chunk 失败不影响其他 chunk
+                logger.warn(`❌ [METAR] chunk ${chunk.join(',')} via ${proxyTag} failed: ${status || ''} ${e.message}`);
             }
-            if (!Array.isArray(resp.data)) continue;
-            for (const e of resp.data) {
-                const id = e?.icaoId;
-                const t = e?.temp;            // 始终 Celsius
-                const ts = e?.obsTime;        // unix seconds
-                if (!id || typeof t !== 'number' || typeof ts !== 'number') continue;
-                if (!byStation.has(id)) byStation.set(id, []);
-                byStation.get(id).push({ obsTime: ts, temp: t, raw: e.rawOb || '' });
-            }
-            if (i + CHUNK_SIZE < stations.length) {
-                await new Promise(r => setTimeout(r, CHUNK_GAP_MS));
-            }
-        }
+        })));
+
+        if (failed > 0) logger.debug(`[METAR] tick: ${failed}/${chunkList.length} chunks failed`);
         return byStation;
     }
 
@@ -370,10 +396,14 @@ class WeatherObservationsCollector extends BaseCollector {
 
     async runSettlementTick() {
         if (this.targets.length === 0) return [];
+        // 并发 settlement，避免 46 城串行跑 4 分钟（实际上根本无法 2min 跑完一轮）。
+        // fetchSettlementOne 内部每次 retry 都随机抽 proxy，多并发也会自然摊匀到 proxy 池。
+        const limit = pLimit(this.settlementConcurrency);
         let success = 0, failed = 0;
         const allUpdates = [];
-        for (let i = 0; i < this.targets.length; i++) {
-            const target = this.targets[i];
+        const t0 = Date.now();
+
+        await Promise.all(this.targets.map(target => limit(async () => {
             try {
                 const byDate = await this.fetchSettlementOne(target);
                 const updates = await this.commitObservations(target, byDate, 'settlement');
@@ -387,11 +417,10 @@ class WeatherObservationsCollector extends BaseCollector {
                 logger.warn(`❌ [Settlement|${target.station}|${target.name}] ${e.message}`);
                 failed++;
             }
-            if (i < this.targets.length - 1) {
-                await this.sleep(this.randInt(1500, 3500));
-            }
-        }
-        logger.info(`🧾 [Settlement] cycle done. success=${success}, failed=${failed}, updates=${allUpdates.length}`);
+        })));
+
+        const elapsed = Date.now() - t0;
+        logger.info(`🧾 [Settlement] cycle done in ${(elapsed / 1000).toFixed(1)}s. success=${success}, failed=${failed}, updates=${allUpdates.length}`);
         return allUpdates;
     }
 
@@ -549,19 +578,13 @@ class WeatherObservationsCollector extends BaseCollector {
             return null;
         }
 
-        // 按城市数动态调 tick 间隔，把 METAR 总请求量压在 rateLimit 以下
-        //   chunks per tick = ceil(N / CHUNK_SIZE)
-        //   req/min = chunks * (60 / tickSec)
-        //   解 tickSec: tickSec >= chunks * 60 / rateLimit
-        // 同时 floor 在 10s（不会比原始预期更快）
-        const CHUNK_SIZE = 3;   // 与 fetchMetarBatch 里一致
-        const chunks = Math.ceil(this.targets.length / CHUNK_SIZE);
-        const desiredSec = Math.max(10, Math.ceil(chunks * 60 / this.metarRateLimitPerMin));
-        const desiredMs = desiredSec * 1000;
-        if (this.intervalMs !== desiredMs) {
-            logger.info(`[Obs] tick interval ${this.intervalMs / 1000}s → ${desiredSec}s `
-                + `(cities=${this.targets.length}, chunks=${chunks}, ~${chunks * 60 / desiredSec | 0} req/min)`);
-            this.intervalMs = desiredMs;
+        // 每个 tick 入口刷一次 proxy 池快照（用户可能动态增减 proxy）
+        await this.loadProxyPool();
+        if (this.tick === 1 || this.tick % 60 === 1) {
+            // 启动时 + 每 60 tick (5 min) 打一次状态日志
+            logger.info(`[Obs] cities=${this.targets.length}, proxies=${this.proxyPool.length}, `
+                + `tick=${this.intervalMs/1000}s, metar concurrency=${this.metarConcurrency}, `
+                + `settlement concurrency=${this.settlementConcurrency}`);
         }
 
         // 每个 tick 都跑 METAR
