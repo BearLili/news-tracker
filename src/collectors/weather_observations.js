@@ -48,27 +48,25 @@ const METAR_BASE = 'https://aviationweather.gov/api/data/metar';
  */
 class WeatherObservationsCollector extends BaseCollector {
     constructor() {
-        // 基础 tick = 2s。METAR 按"出生窗口"分热/冷：
-        //   - 城市的 sliceMinute ~ sliceMinute+8min 期间 → chunk 是 hot，每 tick (2s) 都拉
-        //   - 其余时间 → chunk 是 cold，每 5 tick (10s) 才拉一次
-        // 这样切合 wethr/Polymarket 文档对 aviationweather 高频/低频区间的要求
-        super('weather_observations', 2 * 1000);
+        // 基础 tick = 3s。METAR 按"出生窗口"分热/冷：
+        //   - 城市的 sliceMinute ~ sliceMinute+8min 期间 + 本小时还没抓到 → hot 每 tick (3s)
+        //   - 已抓到本 hot 窗口对应 obs，或者不在窗口 → cold 每 5 tick (15s)
+        super('weather_observations', 3 * 1000);
         this.targets = [];
         this.tick = 0;
-        // Settlement 每 60 tick 跑一次 = 60 × 2s = 120s = 2 分钟（与之前 cadence 一致）
-        this.settlementEveryTicks = 60;
+        // Settlement 每 40 tick 跑一次 = 40 × 3s = 120s = 2 分钟
+        this.settlementEveryTicks = 40;
         this.settlementOffset = 1;
-        // METAR 并发：4 个 chunk 同时拉
         this.metarConcurrency = 4;
-        // Settlement 并发
         this.settlementConcurrency = 8;
-        // METAR 热/冷窗口配置
-        this.metarHotWindowMin = 8;        // 切片后 8 分钟内算"出生窗口"
-        this.metarColdEveryTicks = 5;      // 冷 chunk 每 5 tick (10s) 拉一次
+        // METAR 热/冷配置
+        this.metarHotWindowMin = 8;        // 切片后 8 分钟内
+        this.metarColdEveryTicks = 5;      // cold = 5 × 3s = 15s
         this.metarLastPolled = new Map();  // chunkIdx -> last tick number
-        // Proxy 池快照
+        // 站点 sliceMinute 自动探测：观察 METAR obsTime 的分钟分布
+        this.detectedSlices = new Map();   // station -> [m1, m2?]（半小时报有两个）
+        this.lastFreshObs = new Map();     // station -> 最近一次见到的 obsTime (unix sec)
         this.proxyPool = [];
-        // wethr Push 状态
         this.wethrClient = null;
         this.wethrTargets = [];
         this.wethrBuffer = new Map();
@@ -174,18 +172,55 @@ class WeatherObservationsCollector extends BaseCollector {
             [proxies[i], proxies[j]] = [proxies[j], proxies[i]];
         }
 
-        // 热/冷判定：站点的 sliceMinute (UTC) 到 sliceMinute+8min 期间为"出生窗口"
-        // 该站所在 chunk 视为 hot，每 tick 都拉；其余 cold，每 metarColdEveryTicks 拉一次
+        // 热/冷判定：站点 sliceMinute (UTC) ~ sliceMinute+8min 为"出生窗口"
+        // 三个数据源排序：cities 配置 > 自动探测 > 未知（视为 hot 给探测机会）
+        // 额外优化：若已抓到本窗口对应 obs（lastFreshObs.minute ≈ slice 且时间足够近），降回 cold
         const nowMinute = new Date().getUTCMinutes();
+        const nowSec = Math.floor(Date.now() / 1000);
+        // 抓到判定的"足够近"= 热窗口长度 + 2min 容差
+        const HOT_GRACE_SEC = (this.metarHotWindowMin + 2) * 60;
         const targetByStation = new Map(this.targets.map(t => [t.station, t]));
-        const isStationHot = (station) => {
+
+        // 获取站点的 slice minute 列表（优先 config，回退到自动探测）
+        const getSlices = (station) => {
             const t = targetByStation.get(station);
-            if (!t) return false;
-            const slice = t.sliceMinute === undefined || t.sliceMinute === null || t.sliceMinute === ''
-                ? null : Number(t.sliceMinute);
-            if (slice === null || isNaN(slice) || slice < 0 || slice > 59) return false;
-            const diff = (nowMinute - slice + 60) % 60;
-            return diff < this.metarHotWindowMin;
+            if (!t) return null;
+            const rawCfg = t.sliceMinute;
+            if (rawCfg !== undefined && rawCfg !== null && rawCfg !== '') {
+                const n = Number(rawCfg);
+                if (!isNaN(n) && n >= 0 && n <= 59) return [n];
+            }
+            const detected = this.detectedSlices.get(station);
+            if (detected && detected.length > 0) return detected;
+            return null;
+        };
+
+        const isStationHot = (station) => {
+            const slices = getSlices(station);
+            // 完全未知 sliceMinute 的站点：暂时视为 hot，让本 tick 拉到数据 → 后续 detect
+            if (!slices) return true;
+            // 检查当前是否处于任何一个 slice 的"出生窗口"
+            let activeSlice = null;
+            for (const s of slices) {
+                const diff = (nowMinute - s + 60) % 60;
+                if (diff < this.metarHotWindowMin) { activeSlice = s; break; }
+            }
+            if (activeSlice === null) return false;
+            // 已经在窗口内：检查是否已抓到对应这个 slice 的 obs
+            const lastObs = this.lastFreshObs.get(station) || 0;
+            if (lastObs > 0) {
+                const lastMin = Math.floor(lastObs / 60) % 60;
+                const lastAgo = nowSec - lastObs;
+                // 最新 obs 分钟跟 activeSlice 对得上（±1 容差），且时间足够近 → 抓到了
+                const minDiff = Math.min(
+                    Math.abs(lastMin - activeSlice),
+                    60 - Math.abs(lastMin - activeSlice)
+                );
+                if (minDiff <= 1 && lastAgo <= HOT_GRACE_SEC) {
+                    return false;  // 抓到了，降 cold
+                }
+            }
+            return true;
         };
 
         const limit = pLimit(this.metarConcurrency);
@@ -232,6 +267,9 @@ class WeatherObservationsCollector extends BaseCollector {
                         if (!id || typeof t !== 'number' || typeof ts !== 'number') continue;
                         if (!byStation.has(id)) byStation.set(id, []);
                         byStation.get(id).push({ obsTime: ts, temp: t, raw: e.rawOb || '' });
+                        // 跟踪每站最新 obsTime，供"抓到即降频"判定用
+                        const prev = this.lastFreshObs.get(id) || 0;
+                        if (ts > prev) this.lastFreshObs.set(id, ts);
                     }
                     return; // 成功，跳出 retry 循环
                 } catch (e) {
@@ -250,7 +288,41 @@ class WeatherObservationsCollector extends BaseCollector {
         if (failed > 0 || retried > 0 || skipped > 0) {
             logger.debug(`[METAR] tick: ${failed}/${chunkList.length} fail, ${retried} retry, ${skipped} cold-skip, ${hotChunks} hot`);
         }
+
+        // 自动探测 sliceMinute：对没有 config 且尚未 detected 的站点，从本次响应里挖
+        for (const target of this.targets) {
+            const station = target.station;
+            if (this.detectedSlices.has(station)) continue;
+            const cfg = target.sliceMinute;
+            if (cfg !== undefined && cfg !== null && cfg !== '') continue;  // 已 config
+            const obs = byStation.get(station);
+            if (obs && obs.length >= 3) this._detectSliceFromObs(station, obs);
+        }
+
         return byStation;
+    }
+
+    /**
+     * 从一组 obs 的 obsTime 分钟分布探测站点的 sliceMinute
+     * 半小时报的站点能识别出两个 slice（top 2 peaks 都 ≥ top 1 的 50%）
+     */
+    _detectSliceFromObs(station, obsList) {
+        const hist = new Map();
+        for (const o of obsList) {
+            const m = Math.floor(o.obsTime / 60) % 60;
+            hist.set(m, (hist.get(m) || 0) + 1);
+        }
+        if (hist.size === 0) return;
+        const sorted = [...hist.entries()].sort((a, b) => b[1] - a[1]);
+        const slices = [sorted[0][0]];
+        // 半小时报：第二个 peak 至少占第一个的 50%
+        if (sorted.length > 1 && sorted[1][1] >= sorted[0][1] * 0.5) {
+            slices.push(sorted[1][0]);
+        }
+        slices.sort((a, b) => a - b);
+        this.detectedSlices.set(station, slices);
+        const pretty = slices.map(s => ':' + String(s).padStart(2, '0')).join(', ');
+        logger.info(`[METAR] auto-detected slice for ${station}: ${pretty}`);
     }
 
     /**
