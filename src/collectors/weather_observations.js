@@ -162,46 +162,64 @@ class WeatherObservationsCollector extends BaseCollector {
             chunkList.push(stations.slice(i, i + CHUNK_SIZE));
         }
 
-        // 并发拉取 + proxy 轮转分配
-        // chunk i 用 proxyPool[i % proxyPool.length] —— 保证同一 tick 内每个 proxy
-        // 承担均衡的请求数；多 tick 累计后也是 round-robin 等量分配
-        const proxies = this.proxyPool;
+        // 每个 batch 随机洗牌 proxy 池：避免某个 chunk 永远命中同一个慢 proxy
+        // （之前 proxies[idx % N] 固定映射，慢 proxy 会让对应 chunk 每 tick 都 fail）
+        const proxies = this.proxyPool.slice();
+        for (let i = proxies.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [proxies[i], proxies[j]] = [proxies[j], proxies[i]];
+        }
+
         const limit = pLimit(this.metarConcurrency);
         const byStation = new Map();
         let failed = 0;
+        let retried = 0;
 
         await Promise.all(chunkList.map((chunk, idx) => limit(async () => {
-            const proxyConfig = proxies.length > 0 ? proxies[idx % proxies.length] : null;
-            const proxyTag = proxyConfig ? proxyConfig.host : 'direct';
-            // _t cache-buster：绕开 Azure Front Door 边缘缓存，每次回源
-            const url = `${METAR_BASE}?ids=${chunk.join(',')}&format=json&hours=48&_t=${Date.now()}`;
-            try {
-                const resp = await axios.get(url, {
-                    // 6s 超时：在 5s tick 节奏里给一点余量；快失败让下一轮 retry
-                    timeout: 6000,
-                    headers: {
-                        'User-Agent': 'news-tracker/1.0 (contact: openclaw-agent)',
-                        'Accept': 'application/json'
-                    },
-                    proxy: proxyConfig || false   // 没 proxy 时直连
-                });
-                if (!Array.isArray(resp.data)) return;
-                for (const e of resp.data) {
-                    const id = e?.icaoId;
-                    const t = e?.temp;
-                    const ts = e?.obsTime;
-                    if (!id || typeof t !== 'number' || typeof ts !== 'number') continue;
-                    if (!byStation.has(id)) byStation.set(id, []);
-                    byStation.get(id).push({ obsTime: ts, temp: t, raw: e.rawOb || '' });
+            // 最多尝试 2 次：第 1 次用洗牌后的 proxy[idx]，失败后换 proxy[idx+1]
+            let lastErr = null;
+            for (let attempt = 0; attempt < 2; attempt++) {
+                if (attempt > 0) retried++;
+                const proxyConfig = proxies.length > 0
+                    ? proxies[(idx + attempt) % proxies.length]
+                    : null;
+                const proxyTag = proxyConfig ? proxyConfig.host : 'direct';
+                const url = `${METAR_BASE}?ids=${chunk.join(',')}&format=json&hours=48&_t=${Date.now()}`;
+                try {
+                    const resp = await axios.get(url, {
+                        timeout: 6000,
+                        headers: {
+                            'User-Agent': 'news-tracker/1.0 (contact: openclaw-agent)',
+                            'Accept': 'application/json'
+                        },
+                        proxy: proxyConfig || false
+                    });
+                    if (!Array.isArray(resp.data)) return;
+                    for (const e of resp.data) {
+                        const id = e?.icaoId;
+                        const t = e?.temp;
+                        const ts = e?.obsTime;
+                        if (!id || typeof t !== 'number' || typeof ts !== 'number') continue;
+                        if (!byStation.has(id)) byStation.set(id, []);
+                        byStation.get(id).push({ obsTime: ts, temp: t, raw: e.rawOb || '' });
+                    }
+                    return; // 成功，跳出 retry 循环
+                } catch (e) {
+                    lastErr = e;
+                    if (attempt === 0) {
+                        // 第一次失败：debug log 不刷屏，下一次换 proxy 重试
+                        logger.debug(`[METAR] chunk ${chunk.join(',')} via ${proxyTag} timeout, retrying`);
+                    }
                 }
-            } catch (e) {
-                failed++;
-                const status = e?.response?.status;
-                logger.warn(`❌ [METAR] chunk ${chunk.join(',')} via ${proxyTag} failed: ${status || ''} ${e.message}`);
             }
+            failed++;
+            const status = lastErr?.response?.status;
+            logger.warn(`❌ [METAR] chunk ${chunk.join(',')} failed both attempts: ${status || ''} ${lastErr?.message}`);
         })));
 
-        if (failed > 0) logger.debug(`[METAR] tick: ${failed}/${chunkList.length} chunks failed`);
+        if (failed > 0 || retried > 0) {
+            logger.debug(`[METAR] tick: ${failed}/${chunkList.length} chunks failed, ${retried} retries`);
+        }
         return byStation;
     }
 
