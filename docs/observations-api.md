@@ -199,26 +199,27 @@ poly:latest:wethr_obs               ← 与 poly:feed:wethr_obs 最后一条相�
 
 ```json
 {
-  "type": "metar",                    // "settlement" / "metar" / "wethr"
-  "station": "KLGA",
-  "name": "New York",
+  "type": "wethr",                    // "settlement" / "metar" / "wethr"
+  "station": "KSFO",
+  "name": "San Francisco",
   "date": "2026-06-09",               // 城市本地日
   "unit": "F",
-  "high": 84,
-  "prev_high": 82,                    // 变化前的值（首次为 null）
-  "low": 65,
-  "prev_low": 65,
-  "latest_temp": 84,
-  "prev_latest_temp": 82,
+  "high": 68,
+  "prev_high": 67,                    // 变化前的值（首次为 null）
+  "low": 54,
+  "prev_low": 54,
+  "latest_temp": 68,
+  "prev_latest_temp": 67,
   "latest_obs_ts": 1780654200,        // unix sec
   "prev_latest_obs_ts": 1780650600,
+  "latest_product": "ASOS-HFM",       // 最新一条 obs 的类型：ASOS-HFM/ASOS-HR/SPECI/METAR/null
   "high_obs_ts": 1780654200,
   "low_obs_ts": 1780624800,
-  "obs_count": 23,
-  "prev_count": 22,
-  "first_obs_ts": 1780617600,
+  "obs_count": 13,
+  "prev_count": 12,
+  "first_obs_ts": 1780611600,
   "last_obs_ts": 1780654200,
-  "first_seen_at": 1780617800000      // unix ms
+  "first_seen_at": 1780611800000      // unix ms
 }
 ```
 
@@ -237,6 +238,44 @@ const isNewLow  = u.prev_low  !== null && Number(u.low)  < Number(u.prev_low);
 ```
 
 > ⚠️ 首次创建时 `prev_* = null`，**不要当成新高/新低**——只是初始化。
+
+### 3.4 `latest_product` 字段说明
+
+**update 里只携带"最新一条 obs 的 product"**——不含每条 obs 的 product（那个要 GET detail key）。
+
+| `latest_product` 值 | 含义 | 数据源 |
+|---|---|---|
+| `"ASOS-HFM"` | wethr 5-min HFM 推送 | wethr |
+| `"ASOS-HR"` | wethr 整点 METAR | wethr |
+| `"SPECI"` | wethr 特选报 / aviationweather SPECI / TWC SPECI | wethr/metar/settlement |
+| `"METAR"` | aviationweather 整点 METAR / TWC METAR | metar/settlement |
+| `null` | TWC 没标 metar_type 的老数据兜底 | settlement |
+
+**用法举例**：
+
+```js
+sub.on('message', (channel, raw) => {
+  const msg = JSON.parse(raw);
+  for (const u of msg.data.updates) {
+    if (u.type === 'wethr' && u.latest_product === 'ASOS-HFM') {
+      // 5-min HFM 新数据：可用于预测下个整点 METAR
+      // 不进结算！
+    }
+    if (u.type === 'wethr' && (u.latest_product === 'ASOS-HR' || u.latest_product === 'SPECI')) {
+      // 进结算口径，与 metar/settlement 最终一致
+    }
+  }
+});
+```
+
+### 3.5 推送顺序保证
+
+| 维度 | 保证 |
+|---|---|
+| **同频道内** | Redis pub/sub 严格按 publish 顺序投递 ✅ |
+| **同一 publish 消息内的 updates** | 数组按 collector 处理顺序（通常城市配置序） |
+| **跨频道 (weather_obs vs wethr_obs)** | **不保证**——策略要靠每条 update 的 `latest_obs_ts` 自己排序 |
+| **掉线重连** | Redis pub/sub **不持久化**——断线期间消息丢失。策略重连后用 `GET poly:latest:weather_observations` + `GET poly:latest:wethr_obs` 拿最近快照 |
 
 ---
 

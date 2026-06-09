@@ -364,6 +364,7 @@ class WeatherObservationsCollector extends BaseCollector {
                 slot.latestObsTs = o.obsTime;
                 slot.latestC = o.temp;
                 slot.lastRaw = o.raw || slot.lastRaw;
+                slot.latestProduct = o.product || null;
             }
             if (slot.firstObsTs === 0 || o.obsTime < slot.firstObsTs) {
                 slot.firstObsTs = o.obsTime;
@@ -383,6 +384,7 @@ class WeatherObservationsCollector extends BaseCollector {
                 lowObsTs: info.lowObsTs,
                 latestTemp: conv(info.latestC),
                 latestObsTs: info.latestObsTs,
+                latestProduct: info.latestProduct || null,
                 firstObsTs: info.firstObsTs,
                 lastObsTs: info.latestObsTs,
                 lastRaw: info.lastRaw,
@@ -505,10 +507,14 @@ class WeatherObservationsCollector extends BaseCollector {
             if (t < slot.low || (t === slot.low && ts < slot.lowObsTs)) {
                 slot.low = t; slot.lowObsTs = ts;
             }
-            if (ts > slot.latestObsTs) { slot.latestObsTs = ts; slot.latestTemp = t; }
-            if (slot.firstObsTs === 0 || ts < slot.firstObsTs) slot.firstObsTs = ts;
             // TWC 字段 metar_type 或 class_descriptor 表示 'METAR' / 'SPECI' 等
             const product = o.metar_type || o.class_descriptor || o.obs_class || null;
+            if (ts > slot.latestObsTs) {
+                slot.latestObsTs = ts;
+                slot.latestTemp = t;
+                slot.latestProduct = product;
+            }
+            if (slot.firstObsTs === 0 || ts < slot.firstObsTs) slot.firstObsTs = ts;
             slot.detail.push({ ts, temp: t, product });
         }
         const result = {};
@@ -522,6 +528,7 @@ class WeatherObservationsCollector extends BaseCollector {
                 lowObsTs: info.lowObsTs,
                 latestTemp: info.latestTemp !== null ? Math.round(info.latestTemp) : null,
                 latestObsTs: info.latestObsTs,
+                latestProduct: info.latestProduct || null,
                 firstObsTs: info.firstObsTs,
                 lastObsTs: info.latestObsTs,
                 detail: info.detail.map(x => {
@@ -633,6 +640,9 @@ class WeatherObservationsCollector extends BaseCollector {
             if (info.latestTemp !== null && info.latestTemp !== undefined) {
                 payload.latest_temp = info.latestTemp;
             }
+            // latest_product 让策略直接知道最新一条 obs 是 HFM/HR/SPECI 等
+            // 缺失时用空串占位（hgetall 会忽略空值）
+            payload.latest_product = info.latestProduct || '';
 
             // 首次创建 hash 时记录 first_seen_at
             if (!existing.first_seen_at) payload.first_seen_at = nowMs;
@@ -682,6 +692,7 @@ class WeatherObservationsCollector extends BaseCollector {
                     prev_latest_temp: prevLatestTemp,
                     latest_obs_ts: info.latestObsTs,
                     prev_latest_obs_ts: prevLatestObsTs,
+                    latest_product: info.latestProduct || null,  // 'ASOS-HFM' / 'ASOS-HR' / 'SPECI' / 'METAR' / null
                     high_obs_ts: info.highObsTs,
                     low_obs_ts: info.lowObsTs,
                     obs_count: info.count,
