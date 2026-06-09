@@ -796,35 +796,48 @@ class WeatherObservationsCollector extends BaseCollector {
      * （new_high/new_low 是衍生事件，原始 observation 进 buffer 就够了，避免重复计入）
      */
     _handleWethrEvent(e) {
-        if (!e || e.type !== 'observation') return;
+        if (!e) return;
+        // 调试日志：每个 wethr 事件打印 type + 字段名
+        // 排查"事件收到但 Redis 空"问题；稳定后可降为 DEBUG 或删除
         const d = e.data;
+        const keys = (d && typeof d === 'object') ? Object.keys(d).join(',') : '<non-obj>';
+        logger.info(`[wethr] event type=${e.type} keys=${keys}`);
+
+        if (e.type !== 'observation') return;
         if (!d || typeof d !== 'object') return;
 
         const station = d.station_code;
-        // 关键：用 temperature_f 而不是 temperature（后者是摄氏）
-        const tempF = d.temperature_f;
+        // 兼容两个字段名：早期 doc 写 temperature_fahrenheit，实测 API 用 temperature_f
+        const tempF = (typeof d.temperature_f === 'number') ? d.temperature_f
+                    : (typeof d.temperature_fahrenheit === 'number') ? d.temperature_fahrenheit
+                    : null;
         const obsIso = d.observation_time_utc;
-        if (!station || typeof tempF !== 'number' || !obsIso) return;
+        if (!station || tempF === null || !obsIso) {
+            logger.warn(`[wethr] observation rejected: station=${station} tempF=${tempF} obsIso=${obsIso} keys=${keys}`);
+            return;
+        }
 
         const obsTime = Math.floor(new Date(obsIso).getTime() / 1000);
         if (!isFinite(obsTime) || obsTime <= 0) return;
 
         const buf = this.wethrBuffer.get(station);
-        if (!buf) return; // 收到不在订阅列表里的站，忽略
+        if (!buf) {
+            logger.warn(`[wethr] obs for unknown station ${station} (not in subscription)`);
+            return;
+        }
 
-        // 数据质量降级：anomaly / suspect_temperature → 不进 buffer
         if (d.anomaly === true || d.suspect_temperature === true) {
             logger.debug(`[wethr] dropped ${station} obs at ${obsIso}: anomaly/suspect flagged`);
             return;
         }
 
-        // F → C 让 aggregateMetarByDate 一视同仁
         const tempC = (tempF - 32) * 5 / 9;
         buf.push({
             obsTime,
             temp: tempC,
             raw: `${d.product || 'OBS'} ${tempF}°F`,
         });
+        logger.info(`[wethr] obs accepted ${station} ${tempF}°F @ ${obsIso} (product=${d.product || '?'})`);
     }
 
     /**
