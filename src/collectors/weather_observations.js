@@ -266,7 +266,13 @@ class WeatherObservationsCollector extends BaseCollector {
                         const ts = e?.obsTime;
                         if (!id || typeof t !== 'number' || typeof ts !== 'number') continue;
                         if (!byStation.has(id)) byStation.set(id, []);
-                        byStation.get(id).push({ obsTime: ts, temp: t, raw: e.rawOb || '' });
+                        // metarType: 'METAR' | 'SPECI'（aviationweather 提供，传到 detail 让策略区分）
+                        byStation.get(id).push({
+                            obsTime: ts,
+                            temp: t,
+                            raw: e.rawOb || '',
+                            product: e.metarType || null,
+                        });
                         // 跟踪每站最新 obsTime，供"抓到即降频"判定用
                         const prev = this.lastFreshObs.get(id) || 0;
                         if (ts > prev) this.lastFreshObs.set(id, ts);
@@ -362,7 +368,7 @@ class WeatherObservationsCollector extends BaseCollector {
             if (slot.firstObsTs === 0 || o.obsTime < slot.firstObsTs) {
                 slot.firstObsTs = o.obsTime;
             }
-            slot.detail.push({ ts: o.obsTime, tempC: o.temp, raw: o.raw || '' });
+            slot.detail.push({ ts: o.obsTime, tempC: o.temp, raw: o.raw || '', product: o.product || null });
         }
         const conv = (c) => (c === null || c === -Infinity || c === +Infinity) ? null
             : (target.unit === 'F' ? this.cToF(c) : Math.round(c));
@@ -380,7 +386,12 @@ class WeatherObservationsCollector extends BaseCollector {
                 firstObsTs: info.firstObsTs,
                 lastObsTs: info.latestObsTs,
                 lastRaw: info.lastRaw,
-                detail: info.detail.map(x => ({ ts: x.ts, temp: conv(x.tempC) }))
+                // detail 里 product 只在 wethr 数据里有值；metar/settlement 是 null（不含）
+                detail: info.detail.map(x => {
+                    const out = { ts: x.ts, temp: conv(x.tempC) };
+                    if (x.product) out.product = x.product;
+                    return out;
+                })
             };
         }
         return result;
@@ -470,8 +481,7 @@ class WeatherObservationsCollector extends BaseCollector {
         const yesterday = now.subtract(1, 'day').format('YYYY-MM-DD');
         const valid = [today, yesterday];
 
-        // 聚合逻辑与 METAR 完全对称（拉 → 按本地日过滤 → 找 max/min/latest + 收集 detail）
-        // 唯一差异：TWC 返回的 temp 已是目标单位，不需要 cToF 转换
+        // 聚合逻辑与 METAR 完全对称
         const byDate = {};
         for (const o of obs) {
             const t = o?.temp;
@@ -489,7 +499,6 @@ class WeatherObservationsCollector extends BaseCollector {
             };
             const slot = byDate[d];
             slot.count++;
-            // 严格 > 或同温取最早，避免依赖 TWC 返回顺序
             if (t > slot.high || (t === slot.high && ts < slot.highObsTs)) {
                 slot.high = t; slot.highObsTs = ts;
             }
@@ -498,7 +507,9 @@ class WeatherObservationsCollector extends BaseCollector {
             }
             if (ts > slot.latestObsTs) { slot.latestObsTs = ts; slot.latestTemp = t; }
             if (slot.firstObsTs === 0 || ts < slot.firstObsTs) slot.firstObsTs = ts;
-            slot.detail.push({ ts, temp: t });
+            // TWC 字段 metar_type 或 class_descriptor 表示 'METAR' / 'SPECI' 等
+            const product = o.metar_type || o.class_descriptor || o.obs_class || null;
+            slot.detail.push({ ts, temp: t, product });
         }
         const result = {};
         for (const [d, info] of Object.entries(byDate)) {
@@ -513,8 +524,11 @@ class WeatherObservationsCollector extends BaseCollector {
                 latestObsTs: info.latestObsTs,
                 firstObsTs: info.firstObsTs,
                 lastObsTs: info.latestObsTs,
-                // detail 里 temp 也四舍五入保持一致（settlement 默认整数）
-                detail: info.detail.map(x => ({ ts: x.ts, temp: Math.round(x.temp) }))
+                detail: info.detail.map(x => {
+                    const out = { ts: x.ts, temp: Math.round(x.temp) };
+                    if (x.product) out.product = x.product;
+                    return out;
+                })
             };
         }
         return result;
@@ -836,6 +850,7 @@ class WeatherObservationsCollector extends BaseCollector {
             obsTime,
             temp: tempC,
             raw: `${d.product || 'OBS'} ${tempF}°F`,
+            product: d.product || null,   // ASOS-HFM | ASOS-HR | SPECI | null
         });
         logger.info(`[wethr] obs accepted ${station} ${tempF}°F @ ${obsIso} (product=${d.product || '?'})`);
     }

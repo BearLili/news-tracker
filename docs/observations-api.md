@@ -113,26 +113,47 @@ poly:wethr:obs:{station}:{date}
 ```
 
 - Value = JSON 字符串
-- 内容 = `[{ ts: <unix sec>, temp: <int> }, ...]`，按 `ts` 升序
+- 内容 = `[{ ts, temp, product? }, ...]`，按 `ts` 升序
 - TTL: 14 天
 
 样例：
 
 ```json
 [
-  { "ts": 1780620000, "temp": 25 },
-  { "ts": 1780623600, "temp": 25 },
-  { "ts": 1780627200, "temp": 26 },
-  { "ts": 1780653600, "temp": 33 }
+  { "ts": 1780620000, "temp": 25, "product": "ASOS-HR" },
+  { "ts": 1780620300, "temp": 25, "product": "ASOS-HFM" },
+  { "ts": 1780623600, "temp": 26, "product": "SPECI" },
+  { "ts": 1780653600, "temp": 33, "product": "ASOS-HFM" }
 ]
 ```
 
-策略 agent 想做：
+**`product` 字段语义**（用来区分数据类型，**策略可据此过滤**）：
+
+| Source | product 可能值 | 含义 | **是否进 Polymarket 结算** |
+|---|---|---|---|
+| `wethr` | `ASOS-HFM` | wethr SSE 推送的 5 分钟高频均温 | **❌ 不进结算** |
+| `wethr` | `ASOS-HR` | wethr SSE 推送的整点 METAR | **✅** |
+| `wethr` | `SPECI` | wethr SSE 推送的特选报 | **✅** |
+| `metar` | `METAR` | aviationweather 拉的整点报 | **✅** |
+| `metar` | `SPECI` | aviationweather 拉的特选报 | **✅** |
+| `settlement` | `METAR` / `SPECI` / null | TWC 历史 metar 数据；TWC 偶尔不带类型字段 → null | **✅**（settlement 全是结算口径） |
+
+字段缺失（`product` 不在对象里）= 老数据 / 数据源未提供——策略可视为兜底 metar 类。
+
+**策略只算"结算口径 high"的样板**：
+
+```js
+const obsList = JSON.parse(await reader.get('poly:wethr:obs:KSFO:2026-06-09'));
+const settleableMax = Math.max(...obsList
+  .filter(o => o.product !== 'ASOS-HFM')   // 过滤掉 HFM
+  .map(o => o.temp));
+```
+
+→ 用 detail 明细做：
 - 时序图绘制
 - 多源对比（同时段 settlement vs metar 哪个先到这个温度）
 - 自定义阈值穿越检测
-
-→ 用 detail 明细。
+- 结算口径过滤（product != 'ASOS-HFM'）
 
 ### 2.4 Pub/Sub 最新快照（兜底缓存）
 
