@@ -97,9 +97,18 @@ class WethrPushClient {
         const url = `${SSE_BASE}?stations=${this.stations.join(',')}&api_key=${this.apiKey}`;
         this.stats.connects++;
         let stream;
+
+        // ⚠️ axios 的 timeout 在 stream 模式下是"socket 空闲超时"，会把 SSE 持久流当
+        // 短请求 destroy。wethr heartbeat 30s/次，axios timeout < 30s 必死。
+        // 改用：手工 connectTimer 只管初始握手（15s 没回响应头就 abort），
+        // 拿到响应头后清掉该 timer；之后靠 app 层 HEARTBEAT_TIMEOUT_MS(60s) 看门狗。
+        let connectTimer = null;
         try {
             this.controller = new AbortController();
             this.heartbeatTriggered = false;
+            connectTimer = setTimeout(() => {
+                try { this.controller?.abort(); } catch {}
+            }, CONNECT_TIMEOUT_MS);
             const headers = {
                 'Accept': 'text/event-stream',
                 'User-Agent': 'news-tracker/1.0',
@@ -108,14 +117,17 @@ class WethrPushClient {
             if (this.lastEventId) headers['Last-Event-ID'] = this.lastEventId;
             const resp = await axios.get(url, {
                 responseType: 'stream',
-                timeout: CONNECT_TIMEOUT_MS,
+                timeout: 0,              // 关键：不让 axios 杀长流
                 headers,
                 proxy: false,
                 signal: this.controller.signal,
             });
+            clearTimeout(connectTimer);
+            connectTimer = null;
             stream = resp.data;
             this.stream = stream;
         } catch (e) {
+            if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
             this.connecting = false;
             if (!this.running) return;
             if (e?.code === 'ERR_CANCELED' || /aborted/i.test(e?.message || '')) {
