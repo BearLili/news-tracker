@@ -54,9 +54,11 @@ class WeatherObservationsCollector extends BaseCollector {
         super('weather_observations', 3 * 1000);
         this.targets = [];
         this.tick = 0;
-        // Settlement 每 40 tick 跑一次 = 40 × 3s = 120s = 2 分钟
-        this.settlementEveryTicks = 40;
+        // Settlement 每 6 tick 触发 = 6 × 3s = 18s（用户要求 15-20s）
+        // 跑在后台 promise，不阻塞 3s METAR 节奏；本轮没跑完时下一个 18s 触发会被跳过
+        this.settlementEveryTicks = 6;
         this.settlementOffset = 1;
+        this.settlementRunning = false;
         this.metarConcurrency = 4;
         this.settlementConcurrency = 8;
         // METAR 热/冷配置
@@ -937,18 +939,24 @@ class WeatherObservationsCollector extends BaseCollector {
             );
         }
 
-        // 每个 tick 都跑 METAR
+        // 每个 tick 都跑 METAR（同步等待，必须在 3s 内完成）
         const metarUpdates = await this.runMetarTick();
+        if (metarUpdates.length > 0) await this.publishUpdates(metarUpdates);
 
-        // Settlement: 每 settlementEveryTicks 个 tick 跑一次
-        let settlementUpdates = [];
+        // Settlement: 每 settlementEveryTicks 个 tick 触发一次，**后台跑**
+        // 不 await，避免 settlement 单轮 30-60s 把 METAR 3s 节奏卡死
+        // 用 settlementRunning 防止同时跑多个 cycle 抢 proxy
         if (this.tick % this.settlementEveryTicks === this.settlementOffset % this.settlementEveryTicks) {
-            settlementUpdates = await this.runSettlementTick();
+            if (!this.settlementRunning) {
+                this.settlementRunning = true;
+                this.runSettlementTick()
+                    .then(updates => updates.length > 0 ? this.publishUpdates(updates) : null)
+                    .catch(e => logger.warn(`[Settlement] background cycle error: ${e.message}`))
+                    .finally(() => { this.settlementRunning = false; });
+            } else {
+                logger.debug('[Settlement] previous cycle still running, skip this interval');
+            }
         }
-
-        // METAR + Settlement 发到 weather_obs 频道
-        const weatherObsUpdates = [...metarUpdates, ...settlementUpdates];
-        if (weatherObsUpdates.length > 0) await this.publishUpdates(weatherObsUpdates);
 
         // wethr buffer flush 发到独立 wethr_obs 频道
         const wethrUpdates = await this.runWethrFlush();

@@ -15,7 +15,7 @@
 
 | Source     | 来源                                  | 频率                   | 用途                                   |
 |------------|---------------------------------------|------------------------|----------------------------------------|
-| settlement | api.weather.com (TWC / Wunderground)  | 2 分钟全城            | **Polymarket 裁决基准**（最稳）        |
+| settlement | api.weather.com (TWC / Wunderground)  | 18s 全城（后台跑）    | **Polymarket 裁决基准**（最稳）        |
 | metar      | aviationweather.gov                   | 3s hot / 15s cold      | 近实时实测（结算前 1.5min 拿到 METAR） |
 | wethr      | wethr.net SSE Push                    | 推送驱动（5min HFM）   | 仅 US 5 站，比 aviationweather 早 1-3min |
 
@@ -90,13 +90,14 @@ poly:wethr:{station}:{date}          ←  wethr Push（仅 US 5 站）
 | `low_obs_ts`            | int (str) | unix 秒              | low 对应观测时间                                                                       |
 | `latest_obs_ts`         | int (str) | unix 秒              | 最新观测时间                                                                           |
 | `first_obs_ts`          | int (str) | unix 秒              | 窗口内最早一条观测（注：窗口滑动会让此值向后跳，不是绝对意义的"今日首条"）              |
-| `last_obs_ts`           | int (str) | unix 秒              | 与 `latest_obs_ts` 同义（兼容字段，未来可能废弃）                                       |
+| `last_obs_ts`           | int (str) | unix 秒              | ⚠️ **= `latest_obs_ts` 的别名**，老代码兼容，新代码用 `latest_obs_ts`                  |
 | `high_first_seen_at`    | int (str) | **unix 毫秒 (UTC)**   | **我们 collector 首次记录到这个 high 值的本地 wall clock**                            |
 | `low_first_seen_at`     | int (str) | unix 毫秒            | 同理 low                                                                              |
 | `latest_first_seen_at`  | int (str) | unix 毫秒            | 同理 latest                                                                            |
 | `first_seen_at`         | int (str) | unix 毫秒            | 整个 hash key 首次创建时间                                                            |
 | `updated_at`            | int (str) | unix 毫秒            | 最近一次写入时间                                                                       |
-| `last_raw`              | string    | -                    | 仅 metar/wethr：最新一条观测的原始报文片段（debug 用）                                |
+| `last_raw`              | string    | -                    | 最新一条 obs 的报文文本：metar=完整 METAR 字符串；wethr=合成的 "ASOS-HFM 68°F"；settlement 不存 |
+| `latest_product`        | string    | -                    | 最新一条 obs 的类型：`ASOS-HFM` / `ASOS-HR` / `SPECI` / `METAR` / 空字符串 ← **策略只用这个判类型** |
 
 > ⚠️ **重要时间单位差异**
 > - `*_obs_ts`（数据维度时间）= **unix 秒**
@@ -394,7 +395,7 @@ function isStrictNewHigh(u) {
 ## 7. 节奏 & 延迟期望
 
 ### Settlement
-- 周期 2 分钟全城市批量拉
+- 周期 18s 全城市批量拉（后台跑，单轮跑完才进下一轮，避免抢 proxy）
 - API 自身延迟 5-10 min（TWC 端缓存）
 - **策略不要用 settlement 做实时决策**——做结算对账
 
