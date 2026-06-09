@@ -48,26 +48,31 @@ const METAR_BASE = 'https://aviationweather.gov/api/data/metar';
  */
 class WeatherObservationsCollector extends BaseCollector {
     constructor() {
-        // tick = 5s（高频策略要求每城 5s 内拿到最新 METAR）
-        // 单 IP 100 req/min 上限靠 proxy 池摊匀：46 城 × 16 chunks × 12 tick/min = 192 req/min
-        // 平均到 10 个 proxy = 每 IP ~19 req/min，远低于任何合理 per-IP 限制
-        super('weather_observations', 5 * 1000);
+        // 基础 tick = 2s。METAR 按"出生窗口"分热/冷：
+        //   - 城市的 sliceMinute ~ sliceMinute+8min 期间 → chunk 是 hot，每 tick (2s) 都拉
+        //   - 其余时间 → chunk 是 cold，每 5 tick (10s) 才拉一次
+        // 这样切合 wethr/Polymarket 文档对 aviationweather 高频/低频区间的要求
+        super('weather_observations', 2 * 1000);
         this.targets = [];
         this.tick = 0;
-        // Settlement 每 24 tick 跑一次 = 24 × 5s = 120s = 2 分钟
-        this.settlementEveryTicks = 24;
+        // Settlement 每 60 tick 跑一次 = 60 × 2s = 120s = 2 分钟（与之前 cadence 一致）
+        this.settlementEveryTicks = 60;
         this.settlementOffset = 1;
-        // METAR 并发：4 个 chunk 同时拉，~500ms 一批，16 chunks 约 2-4s 完成（在 5s tick 内）
+        // METAR 并发：4 个 chunk 同时拉
         this.metarConcurrency = 4;
-        // Settlement 并发：城市数多 + 串行慢，用 proxy 并发摊
+        // Settlement 并发
         this.settlementConcurrency = 8;
-        // Proxy 池快照（每 tick 开始时刷新一次）
+        // METAR 热/冷窗口配置
+        this.metarHotWindowMin = 8;        // 切片后 8 分钟内算"出生窗口"
+        this.metarColdEveryTicks = 5;      // 冷 chunk 每 5 tick (10s) 拉一次
+        this.metarLastPolled = new Map();  // chunkIdx -> last tick number
+        // Proxy 池快照
         this.proxyPool = [];
         // wethr Push 状态
         this.wethrClient = null;
-        this.wethrTargets = [];                // city objects with wethrEnabled=true
-        this.wethrBuffer = new Map();          // station -> [{obsTime, temp(C), raw, quality}]
-        this.wethrConfigReady = false;         // 第一次 fetch() 时初始化
+        this.wethrTargets = [];
+        this.wethrBuffer = new Map();
+        this.wethrConfigReady = false;
     }
 
     sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -163,19 +168,44 @@ class WeatherObservationsCollector extends BaseCollector {
         }
 
         // 每个 batch 随机洗牌 proxy 池：避免某个 chunk 永远命中同一个慢 proxy
-        // （之前 proxies[idx % N] 固定映射，慢 proxy 会让对应 chunk 每 tick 都 fail）
         const proxies = this.proxyPool.slice();
         for (let i = proxies.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [proxies[i], proxies[j]] = [proxies[j], proxies[i]];
         }
 
+        // 热/冷判定：站点的 sliceMinute (UTC) 到 sliceMinute+8min 期间为"出生窗口"
+        // 该站所在 chunk 视为 hot，每 tick 都拉；其余 cold，每 metarColdEveryTicks 拉一次
+        const nowMinute = new Date().getUTCMinutes();
+        const targetByStation = new Map(this.targets.map(t => [t.station, t]));
+        const isStationHot = (station) => {
+            const t = targetByStation.get(station);
+            if (!t) return false;
+            const slice = t.sliceMinute === undefined || t.sliceMinute === null || t.sliceMinute === ''
+                ? null : Number(t.sliceMinute);
+            if (slice === null || isNaN(slice) || slice < 0 || slice > 59) return false;
+            const diff = (nowMinute - slice + 60) % 60;
+            return diff < this.metarHotWindowMin;
+        };
+
         const limit = pLimit(this.metarConcurrency);
         const byStation = new Map();
         let failed = 0;
         let retried = 0;
+        let skipped = 0;
+        let hotChunks = 0;
 
         await Promise.all(chunkList.map((chunk, idx) => limit(async () => {
+            const isHot = chunk.some(s => isStationHot(s));
+            if (isHot) hotChunks++;
+            const lastTick = this.metarLastPolled.get(idx) || 0;
+            const ticksSinceLast = this.tick - lastTick;
+            // 冷 chunk + 还没到拉取间隔 → 跳过本 tick
+            if (!isHot && ticksSinceLast < this.metarColdEveryTicks) {
+                skipped++;
+                return;
+            }
+            this.metarLastPolled.set(idx, this.tick);
             // 最多尝试 2 次：第 1 次用洗牌后的 proxy[idx]，失败后换 proxy[idx+1]
             let lastErr = null;
             for (let attempt = 0; attempt < 2; attempt++) {
@@ -217,8 +247,8 @@ class WeatherObservationsCollector extends BaseCollector {
             logger.warn(`❌ [METAR] chunk ${chunk.join(',')} failed both attempts: ${status || ''} ${lastErr?.message}`);
         })));
 
-        if (failed > 0 || retried > 0) {
-            logger.debug(`[METAR] tick: ${failed}/${chunkList.length} chunks failed, ${retried} retries`);
+        if (failed > 0 || retried > 0 || skipped > 0) {
+            logger.debug(`[METAR] tick: ${failed}/${chunkList.length} fail, ${retried} retry, ${skipped} cold-skip, ${hotChunks} hot`);
         }
         return byStation;
     }
