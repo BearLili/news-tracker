@@ -6,6 +6,7 @@ import pLimit from 'p-limit';
 import BaseCollector from '../core/BaseCollector.js';
 import redis from '../core/redis.js';
 import logger from '../utils/logger.js';
+import WethrPushClient from './wethrPushClient.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -62,6 +63,11 @@ class WeatherObservationsCollector extends BaseCollector {
         this.settlementConcurrency = 8;
         // Proxy 池快照（每 tick 开始时刷新一次）
         this.proxyPool = [];
+        // wethr Push 状态
+        this.wethrClient = null;
+        this.wethrTargets = [];                // city objects with wethrEnabled=true
+        this.wethrBuffer = new Map();          // station -> [{obsTime, temp(C), raw, quality}]
+        this.wethrConfigReady = false;         // 第一次 fetch() 时初始化
     }
 
     sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -566,6 +572,184 @@ class WeatherObservationsCollector extends BaseCollector {
         await redis.set(`poly:latest:${this.sourceId}`, msg);
     }
 
+    /** wethr 的 updates 走独立频道，避免冲淡 METAR/Settlement 的 SSE 节奏 */
+    async publishWethrUpdates(updates) {
+        if (updates.length === 0) return;
+        const msg = JSON.stringify({
+            source: 'wethr_push',
+            ts: Date.now(),
+            data: { updates }
+        });
+        await redis.publish('poly:feed:wethr_obs', msg);
+        await redis.set('poly:latest:wethr_obs', msg);
+    }
+
+    // =====================
+    // wethr Push（SSE 子任务）
+    // =====================
+
+    /**
+     * 首次 fetch() 时初始化 wethr SSE 客户端（lazy init）：
+     * - 从 cities 配置筛 wethrEnabled=true 的站点
+     * - 启动 SSE 长连接 + observation 事件入 buffer
+     * - 从 Redis 已有的 detail 恢复 buffer（pm2 重启不丢历史）
+     */
+    async _initWethrIfNeeded() {
+        if (this.wethrConfigReady) return;
+
+        // 三个 early-exit 是"配置不需要 wethr"，可标 ready；
+        // 但 throw 类（_restoreWethrBuffers / WethrPushClient ctor）要保证失败后能重试
+        const enabled = this.targets.filter(t => {
+            const v = t.wethrEnabled;
+            return v === true || v === 'true' || v === '1' || v === 1;
+        });
+        if (enabled.length === 0) {
+            this.wethrConfigReady = true;
+            logger.info('[wethr] no cities have wethrEnabled=1, skipping');
+            return;
+        }
+        if (enabled.length > 5) {
+            this.wethrConfigReady = true;  // 配置错误，重试也没用
+            logger.error(`[wethr] ${enabled.length} cities have wethrEnabled=1 but Professional tier 限 5 站，请减少；skipping wethr`);
+            return;
+        }
+        const apiKey = process.env.WETHR_API_KEY;
+        if (!apiKey) {
+            this.wethrConfigReady = true;  // 启动校验已 fail-fast，理论上到不了这里
+            logger.error('[wethr] WETHR_API_KEY env var missing — wethr disabled');
+            return;
+        }
+
+        // 真正可能抛错的初始化用 try / catch；失败时 wethrConfigReady 保持 false，下个 tick 重试
+        try {
+            this.wethrTargets = enabled;
+            for (const t of enabled) this.wethrBuffer.set(t.station, []);
+            await this._restoreWethrBuffers();
+            this.wethrClient = new WethrPushClient({
+                stations: enabled.map(t => t.station),
+                apiKey,
+                onEvent: (e) => this._handleWethrEvent(e),
+            });
+            this.wethrClient.start();
+            this.wethrConfigReady = true;
+            logger.info(`[wethr] enabled for ${enabled.length} stations: ${enabled.map(t => t.station).join(',')}`);
+        } catch (e) {
+            logger.warn(`[wethr] init failed, will retry next tick: ${e.message}`);
+            this.wethrTargets = [];
+            this.wethrClient = null;
+            // wethrConfigReady 仍是 false，下个 tick 还会调用 _initWethrIfNeeded
+        }
+    }
+
+    async _restoreWethrBuffers() {
+        for (const target of this.wethrTargets) {
+            const tz = target.tz;
+            const now = dayjs().tz(tz);
+            const restored = [];
+            for (const offset of [1, 0]) {
+                const d = now.subtract(offset, 'day').format('YYYY-MM-DD');
+                const raw = await redis.get(`poly:wethr:obs:${target.station}:${d}`);
+                if (!raw) continue;
+                try {
+                    const list = JSON.parse(raw);
+                    if (!Array.isArray(list)) continue;
+                    for (const o of list) {
+                        if (typeof o?.ts === 'number' && typeof o?.temp === 'number') {
+                            // detail 里 temp 是 target.unit；buffer 要 C（aggregateMetarByDate 假设输入 C）
+                            const tempC = target.unit === 'F' ? (o.temp - 32) * 5 / 9 : o.temp;
+                            restored.push({ obsTime: o.ts, temp: tempC, raw: '' });
+                        }
+                    }
+                } catch {}
+            }
+            restored.sort((a, b) => a.obsTime - b.obsTime);
+            this.wethrBuffer.set(target.station, restored);
+            if (restored.length > 0) {
+                logger.info(`[wethr] restored ${restored.length} obs for ${target.station} from Redis`);
+            }
+        }
+    }
+
+    /**
+     * 解析 wethr SSE 事件，提取 observation 入 buffer
+     * 只处理 ASOS-HFM/ASOS-HR/SPECI 的温度观测；忽略 connected/heartbeat/new_high/new_low
+     * （new_high/new_low 是衍生事件，原始 observation 进 buffer 就够了，避免重复计入）
+     */
+    _handleWethrEvent(e) {
+        if (!e || e.type !== 'observation') return;
+        const d = e.data;
+        if (!d || typeof d !== 'object') return;
+
+        const station = d.station_code;
+        // 关键：用 temperature_f 而不是 temperature（后者是摄氏）
+        const tempF = d.temperature_f;
+        const obsIso = d.observation_time_utc;
+        if (!station || typeof tempF !== 'number' || !obsIso) return;
+
+        const obsTime = Math.floor(new Date(obsIso).getTime() / 1000);
+        if (!isFinite(obsTime) || obsTime <= 0) return;
+
+        const buf = this.wethrBuffer.get(station);
+        if (!buf) return; // 收到不在订阅列表里的站，忽略
+
+        // 数据质量降级：anomaly / suspect_temperature → 不进 buffer
+        if (d.anomaly === true || d.suspect_temperature === true) {
+            logger.debug(`[wethr] dropped ${station} obs at ${obsIso}: anomaly/suspect flagged`);
+            return;
+        }
+
+        // F → C 让 aggregateMetarByDate 一视同仁
+        const tempC = (tempF - 32) * 5 / 9;
+        buf.push({
+            obsTime,
+            temp: tempC,
+            raw: `${d.product || 'OBS'} ${tempF}°F`,
+        });
+    }
+
+    /**
+     * 每个 tick 把 buffer flush 进 Redis：
+     * - 先按 48h 窗口 trim buffer（避免无限增长）
+     * - aggregateMetarByDate 算 high/low/latest + detail
+     * - commitObservations 走 'wethr' source（与 metar/settlement 完全对称）
+     */
+    async runWethrFlush() {
+        if (!this.wethrClient || this.wethrTargets.length === 0) return [];
+        const cutoffSec = Math.floor((Date.now() - 48 * 3600 * 1000) / 1000);
+
+        const allUpdates = [];
+        for (const target of this.wethrTargets) {
+            let buf = this.wethrBuffer.get(target.station);
+            if (!buf || buf.length === 0) continue;
+
+            // trim 48h（按 obsTime 升序）
+            buf = buf.filter(o => o.obsTime >= cutoffSec);
+            this.wethrBuffer.set(target.station, buf);
+            if (buf.length === 0) continue;
+
+            const tz = target.tz;
+            const now = dayjs().tz(tz);
+            const valid = [now.format('YYYY-MM-DD'), now.subtract(1, 'day').format('YYYY-MM-DD')];
+            // 直接复用 metar 的聚合：输入 C，按 target.unit 输出
+            const byDate = this.aggregateMetarByDate(buf, target, valid);
+            const updates = await this.commitObservations(target, byDate, 'wethr');
+            allUpdates.push(...updates);
+        }
+        return allUpdates;
+    }
+
+    /** BaseCollector.stop() 的 hook：必须 await 释放 wethr slot，否则 pm2 重启被自己 displaced */
+    async stop() {
+        super.stop();
+        if (this.wethrClient) {
+            const client = this.wethrClient;
+            this.wethrClient = null;
+            try { await client.stop(); } catch (e) {
+                logger.warn(`[wethr] stop error: ${e.message}`);
+            }
+        }
+    }
+
     // =====================
     // 主循环
     // =====================
@@ -580,27 +764,37 @@ class WeatherObservationsCollector extends BaseCollector {
 
         // 每个 tick 入口刷一次 proxy 池快照（用户可能动态增减 proxy）
         await this.loadProxyPool();
+
+        // 第一次 fetch 时初始化 wethr SSE（lazy，因为依赖 loadCitiesConfig 的结果）
+        await this._initWethrIfNeeded();
+
         if (this.tick === 1 || this.tick % 60 === 1) {
             // 启动时 + 每 60 tick (5 min) 打一次状态日志
+            const wstats = this.wethrClient ? this.wethrClient.getStats() : null;
             logger.info(`[Obs] cities=${this.targets.length}, proxies=${this.proxyPool.length}, `
-                + `tick=${this.intervalMs/1000}s, metar concurrency=${this.metarConcurrency}, `
-                + `settlement concurrency=${this.settlementConcurrency}`);
+                + `tick=${this.intervalMs/1000}s, metar conc=${this.metarConcurrency}, `
+                + `settlement conc=${this.settlementConcurrency}`
+                + (wstats ? `, wethr=${wstats.stations.length}st/conn=${wstats.connects}/evt=${wstats.events}/disp=${wstats.displaced}` : '')
+            );
         }
 
         // 每个 tick 都跑 METAR
         const metarUpdates = await this.runMetarTick();
 
-        // Settlement: 每 settlementEveryTicks 个 tick 跑一次（默认 10 → 10 分钟）；
-        // 启动后第一个 tick 也跑（settlementOffset=1）
+        // Settlement: 每 settlementEveryTicks 个 tick 跑一次
         let settlementUpdates = [];
         if (this.tick % this.settlementEveryTicks === this.settlementOffset % this.settlementEveryTicks) {
             settlementUpdates = await this.runSettlementTick();
         }
 
-        const all = [...metarUpdates, ...settlementUpdates];
-        if (all.length > 0) await this.publishUpdates(all);
+        // METAR + Settlement 发到 weather_obs 频道
+        const weatherObsUpdates = [...metarUpdates, ...settlementUpdates];
+        if (weatherObsUpdates.length > 0) await this.publishUpdates(weatherObsUpdates);
 
-        // 自己已经处理了 publish，不依赖 BaseCollector.save 兜底
+        // wethr buffer flush 发到独立 wethr_obs 频道
+        const wethrUpdates = await this.runWethrFlush();
+        if (wethrUpdates.length > 0) await this.publishWethrUpdates(wethrUpdates);
+
         return null;
     }
 }

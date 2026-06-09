@@ -183,7 +183,12 @@ main { padding: 16px 24px 32px; }
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
-.obs-detail-pane[hidden] { display: none; }
+/* 有 wethr 数据时分 3 列 */
+.obs-detail-pane.has-wethr {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+/* 必须 !important：has-wethr/其他派生类的 display:grid 特异性会 override 单 [hidden] */
+.obs-detail-pane[hidden] { display: none !important; }
 .detail-block {
   background: #161b22;
   border: 1px solid #30363d;
@@ -218,8 +223,12 @@ main { padding: 16px 24px 32px; }
 .mini-tag-high { background: rgba(248, 81, 73, 0.2); color: #f85149; }
 .mini-tag-low  { background: rgba(88, 166, 255, 0.2); color: #58a6ff; }
 
+@media (max-width: 1100px) {
+  .obs-detail-pane.has-wethr { grid-template-columns: 1fr 1fr; }
+}
 @media (max-width: 900px) {
-  .obs-detail-pane { grid-template-columns: 1fr; }
+  .obs-detail-pane,
+  .obs-detail-pane.has-wethr { grid-template-columns: 1fr; }
 }
 
 .card {
@@ -286,6 +295,7 @@ td.value-num { text-align: right; font-variant-numeric: tabular-nums; }
 }
 .tag-settlement { background: rgba(63, 185, 80, 0.2); color: #3fb950; }
 .tag-metar { background: rgba(88, 166, 255, 0.2); color: #58a6ff; }
+.tag-wethr { background: rgba(255, 166, 87, 0.2); color: #ffa657; }  /* 暖橙：与 NPM 紫色区分 */
 
 /* NPM card */
 .npm-grid {

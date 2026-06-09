@@ -142,10 +142,11 @@ function renderObservations(root, data) {
     root.innerHTML = '<div class="empty">no cities configured</div>';
     return;
   }
-  // 城市卡片 → 日期块 → settlement/metar 并排 + 可展开明细
-  root.innerHTML = data.cities.map(({ city, local_now, settlement, metar }) => {
-    const todayDate = (settlement.today?.date) || (metar.today?.date) || '';
-    const yesterdayDate = (settlement.yesterday?.date) || (metar.yesterday?.date) || '';
+  // 城市卡片 → 日期块 → settlement/metar/wethr 并排 + 可展开明细
+  root.innerHTML = data.cities.map(({ city, local_now, settlement, metar, wethr }) => {
+    const w = wethr || { today: null, yesterday: null };
+    const todayDate = (settlement.today?.date) || (metar.today?.date) || (w.today?.date) || '';
+    const yesterdayDate = (settlement.yesterday?.date) || (metar.yesterday?.date) || (w.yesterday?.date) || '';
     return `
     <div class="card" data-station="${escape(city.station)}" data-name="${escape((city.name || '').toLowerCase())}">
       <div class="card-header">
@@ -153,8 +154,8 @@ function renderObservations(root, data) {
           ${escape(city.name)} <small>${escape(city.station)} · ${escape(city.unit)} · local ${escape(local_now)}</small>
         </div>
       </div>
-      ${dateBlock(city.station, 'today', todayDate, city.unit, city.tz, settlement.today, metar.today)}
-      ${dateBlock(city.station, 'yesterday', yesterdayDate, city.unit, city.tz, settlement.yesterday, metar.yesterday)}
+      ${dateBlock(city.station, 'today', todayDate, city.unit, city.tz, settlement.today, metar.today, w.today)}
+      ${dateBlock(city.station, 'yesterday', yesterdayDate, city.unit, city.tz, settlement.yesterday, metar.yesterday, w.yesterday)}
     </div>`;
   }).join('');
 }
@@ -164,11 +165,10 @@ function renderObservations(root, data) {
  * yesterday 默认整段折叠（仅显示标题），用户点击展开 summary + detail；today 默认 summary 可见，
  * detail 仍在 pane 里通过同一个点击切换
  */
-function dateBlock(station, when, dateStr, unit, tz, settlementData, metarData) {
+function dateBlock(station, when, dateStr, unit, tz, settlementData, metarData, wethrData) {
   const label = dateStr ? `${dateStr} · ${when}` : when;
   const stateKey = `${station}|${when}|${dateStr || ''}`;
   const userExpanded = expandedSections.has(stateKey);
-  // yesterday：用户没主动展开过 → 整段折叠（is-yesterday-collapsed）
   const yesterdayCollapsed = when === 'yesterday' && !userExpanded;
   const caret = userExpanded ? '▼' : '▶';
   const paneHidden = !userExpanded;
@@ -180,6 +180,11 @@ function dateBlock(station, when, dateStr, unit, tz, settlementData, metarData) 
   const hintText = yesterdayCollapsed
     ? '点击展开 yesterday'
     : (userExpanded ? '点击折叠' : '点击查看 detail');
+
+  // 只在 wethr 真有数据时渲染那一行，国际站直接跳过
+  const hasWethr = wethrData && (wethrData.high !== undefined && wethrData.high !== '' && wethrData.high !== null);
+  const detailHasWethr = wethrData && Array.isArray(wethrData.detail) && wethrData.detail.length > 0;
+  const detailGridCls = (hasWethr || detailHasWethr) ? 'obs-detail-pane has-wethr' : 'obs-detail-pane';
 
   return `
     <div class="${sectionCls}">
@@ -201,11 +206,13 @@ function dateBlock(station, when, dateStr, unit, tz, settlementData, metarData) 
         <tbody>
           ${obsRow('settlement', unit, tz, settlementData)}
           ${obsRow('metar', unit, tz, metarData)}
+          ${hasWethr ? obsRow('wethr', unit, tz, wethrData) : ''}
         </tbody>
       </table>
-      <div class="obs-detail-pane" ${paneHidden ? 'hidden' : ''}>
+      <div class="${detailGridCls}" ${paneHidden ? 'hidden' : ''}>
         ${detailSection('settlement', unit, tz, settlementData)}
         ${detailSection('metar', unit, tz, metarData)}
+        ${(hasWethr || detailHasWethr) ? detailSection('wethr', unit, tz, wethrData) : ''}
       </div>
     </div>
   `;
@@ -495,38 +502,48 @@ function addToast(opts) {
   el.addEventListener('click', () => { clearTimeout(t); removeToast(); });
 }
 
+// wethr 走马灯三重 gate：
+// 1) isNewHigh/isNewLow 判定（必备）
+// 2) per-station 30s debounce（吸收传感器 90→91→92 连跳，只让第一条进 ticker）
+// 3) 幅度阈值 Δ ≥ 1°F（rounding-flap 直接吃掉）
+const WETHR_DEBOUNCE_MS = 30_000;
+const WETHR_THRESHOLD = 1;  // 1°F 或 1°C，按 unit 量纲一致
+const wethrTickerLast = new Map();  // station|kind -> ts
+
 function handleWeatherObsUpdate(u) {
-  // 用 Number() 兜底字符串/数字混合
   const high = u.high === null || u.high === undefined ? null : Number(u.high);
   const prevHigh = u.prev_high === null || u.prev_high === undefined ? null : Number(u.prev_high);
   const low = u.low === null || u.low === undefined ? null : Number(u.low);
   const prevLow = u.prev_low === null || u.prev_low === undefined ? null : Number(u.prev_low);
-  const latestTemp = u.latest_temp === null || u.latest_temp === undefined ? null : Number(u.latest_temp);
-  const prevLatestTemp = u.prev_latest_temp === null || u.prev_latest_temp === undefined ? null : Number(u.prev_latest_temp);
 
   const isNewHigh = prevHigh !== null && high !== null && high > prevHigh;
   const isNewLow  = prevLow  !== null && low  !== null && low  < prevLow;
 
-  // 走马灯只关心"新高/新低"这种强信号，其他（latest_temp 变化、obs_count++）不展示
-  // 避免事件密度过高导致 ticker 堆叠
   if (!isNewHigh && !isNewLow) return;
+
+  // wethr 三重 gate：高低**分别**判定（避免极端情况同时新高新低时低温被吃）
+  const checkWethrGate = (kind, delta) => {
+    if (u.type !== 'wethr') return true;
+    const dKey = `${u.station}|${kind}`;
+    const lastTs = wethrTickerLast.get(dKey) || 0;
+    if (Date.now() - lastTs < WETHR_DEBOUNCE_MS) return false;
+    if (delta < WETHR_THRESHOLD) return false;
+    wethrTickerLast.set(dKey, Date.now());
+    return true;
+  };
+  const showHigh = isNewHigh && checkWethrGate('high', high - prevHigh);
+  const showLow  = isNewLow  && checkWethrGate('low',  prevLow - low);
+  if (!showHigh && !showLow) return;
 
   const city = `${escape(u.name || u.station)} <small>(${escape(u.station)} · ${escape(u.type)})</small>`;
   const u_ = escape(u.unit || '');
 
-  // 1) 走马灯条目
-  let tickerCls, icon, info;
-  if (isNewHigh) {
-    tickerCls = 'ticker-item-high'; icon = '🔥 NEW HIGH';
-    info = `high <strong>${escape(prevHigh)}° → ${escape(high)}°${u_}</strong>`;
-  } else {
-    tickerCls = 'ticker-item-low'; icon = '❄️ NEW LOW';
-    info = `low <strong>${escape(prevLow)}° → ${escape(low)}°${u_}</strong>`;
-  }
-  addTickerItem(tickerCls, `<span class="ticker-icon">${icon}</span><span class="ticker-city">${city}</span> · <span class="ticker-info">${info}</span>`);
-
-  // 2) 新高温/新低温：醒目 toast（高温更明显）
-  if (isNewHigh) {
+  // 高温和低温独立展示（同一 update 可能两个都触发）
+  if (showHigh) {
+    addTickerItem(
+      'ticker-item-high',
+      `<span class="ticker-icon">🔥 NEW HIGH</span><span class="ticker-city">${city}</span> · <span class="ticker-info">high <strong>${escape(prevHigh)}° → ${escape(high)}°${u_}</strong></span>`
+    );
     addToast({
       cls: '',
       row1: `🔥 NEW HIGH · ${u.type}`,
@@ -534,7 +551,12 @@ function handleWeatherObsUpdate(u) {
       row3: `${prevHigh}°${u.unit} → ${high}°${u.unit} · ${u.date}`,
       ttl: 12000,
     });
-  } else if (isNewLow) {
+  }
+  if (showLow) {
+    addTickerItem(
+      'ticker-item-low',
+      `<span class="ticker-icon">❄️ NEW LOW</span><span class="ticker-city">${city}</span> · <span class="ticker-info">low <strong>${escape(prevLow)}° → ${escape(low)}°${u_}</strong></span>`
+    );
     addToast({
       cls: 'toast-low',
       row1: `❄️ NEW LOW · ${u.type}`,
@@ -554,6 +576,18 @@ function parseSseData(raw) {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
+// observations Tab reload 节流：多条 SSE（weather_obs / wethr_obs）合并一次拉
+// 2s debounce 兼顾响应感和不刷屏
+const OBS_RELOAD_DEBOUNCE_MS = 2_000;
+let obsReloadTimer = null;
+function scheduleObservationsReload() {
+  if (obsReloadTimer) return;
+  obsReloadTimer = setTimeout(() => {
+    obsReloadTimer = null;
+    loadTab('observations');
+  }, OBS_RELOAD_DEBOUNCE_MS);
+}
+
 // =====================
 // SSE：服务端推变化，触发刷新 + 通知
 // =====================
@@ -568,10 +602,17 @@ function connectSSE() {
     sseEl.textContent = 'disconnected, retrying…';
     sseEl.className = 'disconnected';
   };
+  // 两个频道都走同一个 reload 节流——否则 wethr 节流形同虚设：
+  // wethr 5s 内若 metar 也推一条，metar handler 会立即 loadTab，把 wethr 状态顺带刷出来
   evt.addEventListener('weather_obs', (e) => {
     const msg = parseSseData(e.data);
     if (msg?.data?.updates) for (const u of msg.data.updates) handleWeatherObsUpdate(u);
-    loadTab('observations');
+    scheduleObservationsReload();
+  });
+  evt.addEventListener('wethr_obs', (e) => {
+    const msg = parseSseData(e.data);
+    if (msg?.data?.updates) for (const u of msg.data.updates) handleWeatherObsUpdate(u);
+    scheduleObservationsReload();
   });
   evt.addEventListener('npm_pricing', (e) => {
     const msg = parseSseData(e.data);
