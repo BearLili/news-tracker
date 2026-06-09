@@ -23,6 +23,7 @@ const HEARTBEAT_TIMEOUT_MS = 60_000;
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const DISPLACED_COOLDOWN_MS = 30_000;
+const RATE_LIMIT_COOLDOWN_MS = 60_000;  // 429 默认冷却（无 Retry-After 时）
 const CONNECT_TIMEOUT_MS = 15_000;
 
 class WethrPushClient {
@@ -54,7 +55,7 @@ class WethrPushClient {
         this.backoffMs = INITIAL_BACKOFF_MS;
         this.lastEventId = null;
         this.connectedAt = null;
-        this.stats = { connects: 0, events: 0, displaced: 0, errors: 0, lastConnectedAt: null };
+        this.stats = { connects: 0, events: 0, displaced: 0, errors: 0, rateLimited: 0, lastConnectedAt: null };
     }
 
     /** 把 URL 里的 api_key 字段抹掉给日志用，防 pm2 log 泄漏 */
@@ -116,14 +117,36 @@ class WethrPushClient {
             this.stream = stream;
         } catch (e) {
             this.connecting = false;
-            // 用户主动 stop → 不重连
             if (!this.running) return;
             if (e?.code === 'ERR_CANCELED' || /aborted/i.test(e?.message || '')) {
-                // 心跳超时引起的 abort 也是 CANCELED，仍需重连
                 if (this.heartbeatTriggered) {
                     this.heartbeatTriggered = false;
                     this._scheduleReconnect();
                 }
+                return;
+            }
+
+            // 429 = Too Many Requests：长冷却，优先用服务端 Retry-After 头
+            // 不要走指数退避——这是 server 明确说"歇一会"的信号
+            const status = e?.response?.status;
+            if (status === 429) {
+                this.stats.rateLimited++;
+                const retryAfterRaw = e?.response?.headers?.['retry-after'];
+                let cooldown = RATE_LIMIT_COOLDOWN_MS;
+                if (retryAfterRaw) {
+                    // Retry-After 可以是秒数或 HTTP date
+                    const sec = parseInt(retryAfterRaw, 10);
+                    if (isFinite(sec) && sec > 0) cooldown = sec * 1000;
+                }
+                logger.warn(`[wethr] 429 Too Many Requests, cooling down ${cooldown/1000}s (retry-after=${retryAfterRaw || 'n/a'})`);
+                this._scheduleReconnect(cooldown);
+                return;
+            }
+            // 5xx：服务端临时不可用，也走稍长冷却（用现有 backoff 但起步高一点）
+            if (status && status >= 500) {
+                logger.warn(`[wethr] ${status} Server error, cooling down ${this.backoffMs/1000}s`);
+                this.stats.errors++;
+                this._scheduleReconnect();
                 return;
             }
             logger.warn(`[wethr] connect failed: ${e.message} (url=${this._safeUrl(url)})`);
