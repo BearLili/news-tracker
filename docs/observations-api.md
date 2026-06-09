@@ -7,6 +7,18 @@
 > 推送方式：Redis Pub/Sub
 > 配置入口：`poly:config:cities` Hash
 
+## 0. 一句话心智模型
+
+```
+3 类温度数据：
+  ① 结算 (settlement)  ← TWC 历史 metar，Polymarket 同源，权威
+  ② 实测 (metar)       ← 两个数据源（wethr/aviationweather），同物理观测，谁先到用谁
+  ③ 预测 (HFM)         ← wethr 独有，5-min 高频均温，不进结算，仅 US 5 站
+
+策略关心 ①+② 做结算判定，关心 ③ 做尖峰预测。
+判类型用 latest_product / high_product / low_product 字段（一眼就分）。
+```
+
 ---
 
 ## 1. 数据源总览
@@ -87,7 +99,9 @@ poly:wethr:{station}:{date}          ←  wethr Push（仅 US 5 站）
 | `latest_temp`           | int (str) | °unit                | **最新一条观测的温度**（不一定是 high！METAR/wethr 高敏感场景常用）                   |
 | `obs_count`             | int (str) | -                    | 累计观测条数（48h 窗口内本日的）                                                       |
 | `high_obs_ts`           | int (str) | **unix 秒 (UTC)**     | high 对应那条观测在站点端的发生时间                                                    |
+| `high_product`          | string    | -                    | high 对应那条 obs 的 product (`ASOS-HFM` / `ASOS-HR` / `SPECI` / `METAR` / 空)。**策略判 wethr.high 是否被 HFM 污染**：`high_product === 'ASOS-HFM'` 即是 |
 | `low_obs_ts`            | int (str) | unix 秒              | low 对应观测时间                                                                       |
+| `low_product`           | string    | -                    | low 对应那条 obs 的 product，同上                                                       |
 | `latest_obs_ts`         | int (str) | unix 秒              | 最新观测时间                                                                           |
 | `first_obs_ts`          | int (str) | unix 秒              | 窗口内最早一条观测（注：窗口滑动会让此值向后跳，不是绝对意义的"今日首条"）              |
 | `last_obs_ts`           | int (str) | unix 秒              | ⚠️ **= `latest_obs_ts` 的别名**，老代码兼容，新代码用 `latest_obs_ts`                  |
@@ -215,7 +229,9 @@ poly:latest:wethr_obs               ← 与 poly:feed:wethr_obs 最后一条相�
   "prev_latest_obs_ts": 1780650600,
   "latest_product": "ASOS-HFM",       // 最新一条 obs 的类型：ASOS-HFM/ASOS-HR/SPECI/METAR/null
   "high_obs_ts": 1780654200,
+  "high_product": "ASOS-HFM",         // ⚠️ 若 == 'ASOS-HFM' 表示 wethr.high 被 HFM 尖峰污染，不能直接当结算判定
   "low_obs_ts": 1780624800,
+  "low_product": "ASOS-HR",
   "obs_count": 13,
   "prev_count": 12,
   "first_obs_ts": 1780611600,

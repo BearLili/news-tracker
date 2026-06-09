@@ -356,11 +356,12 @@ class WeatherObservationsCollector extends BaseCollector {
             const slot = byDate[d];
             slot.count++;
             // 严格 > 或同温取最早（避免依赖 TWC/NOAA 返回顺序导致 highObsTs flapping）
+            // 同时跟踪 high/low 对应的 product，让策略一眼能判 "这个 high 是不是 HFM 产生的"
             if (o.temp > slot.highC || (o.temp === slot.highC && o.obsTime < slot.highObsTs)) {
-                slot.highC = o.temp; slot.highObsTs = o.obsTime;
+                slot.highC = o.temp; slot.highObsTs = o.obsTime; slot.highProduct = o.product || null;
             }
             if (o.temp < slot.lowC || (o.temp === slot.lowC && o.obsTime < slot.lowObsTs)) {
-                slot.lowC = o.temp; slot.lowObsTs = o.obsTime;
+                slot.lowC = o.temp; slot.lowObsTs = o.obsTime; slot.lowProduct = o.product || null;
             }
             if (o.obsTime > slot.latestObsTs) {
                 slot.latestObsTs = o.obsTime;
@@ -384,6 +385,8 @@ class WeatherObservationsCollector extends BaseCollector {
                 count: info.count,
                 highObsTs: info.highObsTs,
                 lowObsTs: info.lowObsTs,
+                highProduct: info.highProduct || null,
+                lowProduct: info.lowProduct || null,
                 latestTemp: conv(info.latestC),
                 latestObsTs: info.latestObsTs,
                 latestProduct: info.latestProduct || null,
@@ -503,14 +506,13 @@ class WeatherObservationsCollector extends BaseCollector {
             };
             const slot = byDate[d];
             slot.count++;
+            const product = o.metar_type || o.class_descriptor || o.obs_class || null;
             if (t > slot.high || (t === slot.high && ts < slot.highObsTs)) {
-                slot.high = t; slot.highObsTs = ts;
+                slot.high = t; slot.highObsTs = ts; slot.highProduct = product;
             }
             if (t < slot.low || (t === slot.low && ts < slot.lowObsTs)) {
-                slot.low = t; slot.lowObsTs = ts;
+                slot.low = t; slot.lowObsTs = ts; slot.lowProduct = product;
             }
-            // TWC 字段 metar_type 或 class_descriptor 表示 'METAR' / 'SPECI' 等
-            const product = o.metar_type || o.class_descriptor || o.obs_class || null;
             if (ts > slot.latestObsTs) {
                 slot.latestObsTs = ts;
                 slot.latestTemp = t;
@@ -528,6 +530,8 @@ class WeatherObservationsCollector extends BaseCollector {
                 count: info.count,
                 highObsTs: info.highObsTs,
                 lowObsTs: info.lowObsTs,
+                highProduct: info.highProduct || null,
+                lowProduct: info.lowProduct || null,
                 latestTemp: info.latestTemp !== null ? Math.round(info.latestTemp) : null,
                 latestObsTs: info.latestObsTs,
                 latestProduct: info.latestProduct || null,
@@ -642,9 +646,11 @@ class WeatherObservationsCollector extends BaseCollector {
             if (info.latestTemp !== null && info.latestTemp !== undefined) {
                 payload.latest_temp = info.latestTemp;
             }
-            // latest_product 让策略直接知道最新一条 obs 是 HFM/HR/SPECI 等
-            // 缺失时用空串占位（hgetall 会忽略空值）
+            // *_product 字段：让策略一眼判 "high/low/latest 是不是 HFM 产生的"
+            // 不用 GET detail 找 by ts 再读 product
             payload.latest_product = info.latestProduct || '';
+            payload.high_product = info.highProduct || '';
+            payload.low_product = info.lowProduct || '';
 
             // 首次创建 hash 时记录 first_seen_at
             if (!existing.first_seen_at) payload.first_seen_at = nowMs;
@@ -694,9 +700,11 @@ class WeatherObservationsCollector extends BaseCollector {
                     prev_latest_temp: prevLatestTemp,
                     latest_obs_ts: info.latestObsTs,
                     prev_latest_obs_ts: prevLatestObsTs,
-                    latest_product: info.latestProduct || null,  // 'ASOS-HFM' / 'ASOS-HR' / 'SPECI' / 'METAR' / null
+                    latest_product: info.latestProduct || null,
                     high_obs_ts: info.highObsTs,
+                    high_product: info.highProduct || null,
                     low_obs_ts: info.lowObsTs,
+                    low_product: info.lowProduct || null,
                     obs_count: info.count,
                     prev_count: prevCount,
                     first_obs_ts: info.firstObsTs || null,
