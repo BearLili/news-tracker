@@ -142,6 +142,12 @@ poly:wethr:obs:{station}:{date}
 ]
 ```
 
+> **⚠️ wethr 假 HR 已在采集端纠正**
+> wethr beta 在真整点 METAR 到达前，会把 HFM 值复制一条贴 `ASOS-HR` 标签占位
+> （obsTime 仍落在 HFM 的 5 分钟整边界 :50/:55）。采集器已自动检测纠正：
+> `product='ASOS-HR' 但 obsTime%300==0` → 改回 `ASOS-HFM`，并按 obsTime 去重。
+> 所以策略拿到的 `ASOS-HR` 都是**真整点 METAR**（obsTime 落在站点切片分钟），可放心当结算口径。
+
 **`product` 字段语义**（用来区分数据类型，**策略可据此过滤**）：
 
 | Source | product 可能值 | 含义 | **是否进 Polymarket 结算** |

@@ -812,7 +812,9 @@ class WeatherObservationsCollector extends BaseCollector {
                         if (typeof o?.ts === 'number' && typeof o?.temp === 'number') {
                             // detail 里 temp 是 target.unit；buffer 要 C（aggregateMetarByDate 假设输入 C）
                             const tempC = target.unit === 'F' ? (o.temp - 32) * 5 / 9 : o.temp;
-                            restored.push({ obsTime: o.ts, temp: tempC, raw: '' });
+                            // 带回 product（Redis 里已是纠正后的值）；丢了会让重启后这批数据
+                            // 被策略当非 HFM 误判（filter product!=='ASOS-HFM' 放行 HFM 尖峰）
+                            restored.push({ obsTime: o.ts, temp: tempC, raw: '', product: o.product || null });
                         }
                     }
                 } catch {}
@@ -866,14 +868,26 @@ class WeatherObservationsCollector extends BaseCollector {
             return;
         }
 
+        // wethr beta "假 HR" 纠正：
+        // wethr 在真整点 METAR 到达前，会把 HFM 值复制一条贴 'ASOS-HR' 标签占位。
+        // 物理铁律：真 HFM 的 obsTime 落在 5 分钟整边界 (:50/:55)，真整点 METAR 落在
+        // 站点切片分钟 (:51/:53/:56 等，非 5 分钟整)。
+        // 所以 product='ASOS-HR' 但 obsTime%300==0 → 必是假 HR（HFM 占位）→ 纠正回 ASOS-HFM，
+        // 否则会污染结算口径判定（策略 filter product!=='ASOS-HFM' 会误把 HFM 尖峰当结算值）。
+        let product = d.product || null;
+        if (product === 'ASOS-HR' && obsTime % 300 === 0) {
+            logger.warn(`[wethr] fake-HR corrected → ASOS-HFM: ${station} ${tempF}°F @ ${obsIso} (obsTime on 5min boundary)`);
+            product = 'ASOS-HFM';
+        }
+
         const tempC = (tempF - 32) * 5 / 9;
         buf.push({
             obsTime,
             temp: tempC,
-            raw: `${d.product || 'OBS'} ${tempF}°F`,
-            product: d.product || null,   // ASOS-HFM | ASOS-HR | SPECI | null
+            raw: `${product || 'OBS'} ${tempF}°F`,
+            product,   // ASOS-HFM | ASOS-HR | SPECI | null（假 HR 已纠正）
         });
-        logger.info(`[wethr] obs accepted ${station} ${tempF}°F @ ${obsIso} (product=${d.product || '?'})`);
+        logger.info(`[wethr] obs accepted ${station} ${tempF}°F @ ${obsIso} (product=${product || '?'})`);
     }
 
     /**
@@ -891,8 +905,19 @@ class WeatherObservationsCollector extends BaseCollector {
             let buf = this.wethrBuffer.get(target.station);
             if (!buf || buf.length === 0) continue;
 
-            // trim 48h（按 obsTime 升序）
-            buf = buf.filter(o => o.obsTime >= cutoffSec);
+            // trim 48h + 同 obsTime 去重
+            // 假 HR 纠正后会与真 HFM 同 obsTime 同值（重复），重连补发也可能重复。
+            // 同 obsTime 保留 product 优先级最高的：真整点报 > SPECI > HFM。
+            const productRank = (p) => p === 'ASOS-HR' ? 3 : (p === 'SPECI' ? 2 : 1);
+            const byTs = new Map();
+            for (const o of buf) {
+                if (o.obsTime < cutoffSec) continue;
+                const exist = byTs.get(o.obsTime);
+                if (!exist || productRank(o.product) > productRank(exist.product)) {
+                    byTs.set(o.obsTime, o);
+                }
+            }
+            buf = [...byTs.values()].sort((a, b) => a.obsTime - b.obsTime);
             this.wethrBuffer.set(target.station, buf);
             if (buf.length === 0) continue;
 
