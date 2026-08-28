@@ -126,6 +126,27 @@ class WeatherObservationsCollector extends BaseCollector {
         };
     }
 
+    _requestErrorDetail(error) {
+        const data = error?.response?.data;
+        const normalize = (value) => {
+            if (value === undefined || value === null) return '';
+            if (typeof value === 'string') return value.trim();
+            try {
+                const serialized = JSON.stringify(value);
+                if (serialized) return serialized;
+            } catch { /* fall through to String */ }
+            return String(value).trim();
+        };
+        const candidates = data && typeof data === 'object'
+            ? [data.error, data.code, data.message]
+            : [data];
+        for (const candidate of [...candidates, error?.code, error?.message]) {
+            const detail = normalize(candidate);
+            if (detail) return detail;
+        }
+        return 'unknown error';
+    }
+
     /** 拉全部 proxy 列表（不是随机一个），用于轮转分配给并发请求 */
     async loadProxyPool() {
         try {
@@ -251,13 +272,16 @@ class WeatherObservationsCollector extends BaseCollector {
                     ? proxies[(idx + attempt) % proxies.length]
                     : null;
                 const proxyTag = proxyConfig ? proxyConfig.host : 'direct';
-                const url = `${METAR_BASE}?ids=${chunk.join(',')}&format=json&hours=48&_t=${Date.now()}`;
+                const url = `${METAR_BASE}?ids=${chunk.join(',')}&format=json&hours=48`;
                 try {
                     const resp = await axios.get(url, {
                         timeout: 6000,
                         headers: {
                             'User-Agent': 'news-tracker/1.0 (contact: openclaw-agent)',
-                            'Accept': 'application/json'
+                            'Accept': 'application/json',
+                            // aviationweather 会拒绝 `_t` 等未登记 query 参数；用标准请求头要求 CDN 重新验证。
+                            'Cache-Control': 'no-cache',
+                            'Pragma': 'no-cache'
                         },
                         proxy: proxyConfig || false
                     });
@@ -284,13 +308,16 @@ class WeatherObservationsCollector extends BaseCollector {
                     lastErr = e;
                     if (attempt === 0) {
                         // 第一次失败：debug log 不刷屏，下一次换 proxy 重试
-                        logger.debug(`[METAR] chunk ${chunk.join(',')} via ${proxyTag} timeout, retrying`);
+                        const status = e.response?.status;
+                        const detail = this._requestErrorDetail(e);
+                        logger.debug(`[METAR] chunk ${chunk.join(',')} via ${proxyTag} failed: ${status ? `HTTP ${status} ` : ''}${detail}, retrying`);
                     }
                 }
             }
             failed++;
             const status = lastErr?.response?.status;
-            logger.warn(`❌ [METAR] chunk ${chunk.join(',')} failed both attempts: ${status || ''} ${lastErr?.message}`);
+            const detail = this._requestErrorDetail(lastErr);
+            logger.warn(`❌ [METAR] chunk ${chunk.join(',')} failed both attempts: ${status ? `HTTP ${status} ` : ''}${detail}`);
         })));
 
         if (failed > 0 || retried > 0 || skipped > 0) {
