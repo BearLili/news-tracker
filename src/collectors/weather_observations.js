@@ -9,6 +9,7 @@ import logger from '../utils/logger.js';
 import WethrPushClient from './wethrPushClient.js';
 import { aggregateRuleMetar, RULE_METAR_MAX_REPORTS } from './weather-rule-metar.js';
 import { WeatherRuleMetarStore } from './weather-rule-metar-store.js';
+import { getRuleMetarTargets } from './weather-rule-metar-targets.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -207,7 +208,8 @@ class WeatherObservationsCollector extends BaseCollector {
         const nowSec = Math.floor(Date.now() / 1000);
         // 抓到判定的"足够近"= 热窗口长度 + 2min 容差
         const HOT_GRACE_SEC = (this.metarHotWindowMin + 2) * 60;
-        const targetByStation = new Map(this.targets.map(t => [t.station, t]));
+        const metarTargets = getRuleMetarTargets(this.targets);
+        const targetByStation = new Map(metarTargets.map(t => [t.station, t]));
 
         // 获取站点的 slice minute 列表（优先 config，回退到自动探测）
         const getSlices = (station) => {
@@ -344,7 +346,7 @@ class WeatherObservationsCollector extends BaseCollector {
         }
 
         // 自动探测 sliceMinute：对没有 config 且尚未 detected 的站点，从本次响应里挖
-        for (const target of this.targets) {
+        for (const target of metarTargets) {
             const station = target.station;
             if (this.detectedSlices.has(station)) continue;
             const cfg = target.sliceMinute;
@@ -456,7 +458,7 @@ class WeatherObservationsCollector extends BaseCollector {
         if (!snapshots || this.ruleMetarRunning) return;
         this.ruleMetarRunning = true;
         try {
-            for (const target of this.targets) {
+            for (const target of getRuleMetarTargets(this.targets)) {
                 const snapshot = snapshots.get(target.station);
                 if (!snapshot) continue;
                 const today = dayjs().tz(target.tz);
@@ -475,7 +477,7 @@ class WeatherObservationsCollector extends BaseCollector {
 
     async runMetarTick() {
         if (this.targets.length === 0) return [];
-        const stations = this.targets.map(t => t.station);
+        const stations = getRuleMetarTargets(this.targets).map(t => t.station);
 
         let byStation;
         try {

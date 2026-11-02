@@ -74,6 +74,17 @@ AWC 接口说明 https://aviationweather.gov/data/api/ （400 行上限、204 �
 
 ## 后续上线顺序（本 PR 不部署）
 
+### 丹佛站点（2026-11-02 修复）
+
+当前 Denver 市场规则指定 KDEN，但原城市配置/预测仍为 KBKF。
+当有效采集配置包含 KBKF、F、America/Denver 时，仅为规则观测追加 KDEN。
+若配置已有 KDEN 则去重；不继承 KBKF 的报时分钟，沿用既有自动探测和冷热轮询。
+复用原 AWC 请求池，最多新增一个三站请求批次，无新定时器或 Redis 连接。
+真实 KDEN 报文只写 `poly:rule_metar:KDEN:{date}` 及其原文键；原 METAR、
+settlement、TWC、wethr、预测与城市配置均不改，不将 KBKF 温度复制为 KDEN。
+
+增加回归：`node --test src/test/weather-rule-metar-targets.test.js`。
+
 先部署 news 并验证新键，再部署依赖它的 V2 PR。V1/DV1 不读取新键。
 回退 V2 不需要改 Redis；回退 news 后新字段会过期，V2 的观测覆盖失效，
 预测策略继续，不能把缺字段变成全局停买。
