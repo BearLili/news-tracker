@@ -1,5 +1,5 @@
 import axios from 'axios';
-import * as cheerio from 'cheerio';
+import { fetchWundergroundForecast } from './wunderground-forecast.js';
 import BaseCollector from '../core/BaseCollector.js';
 import logger from '../utils/logger.js';
 import dayjs from 'dayjs';
@@ -17,6 +17,7 @@ class WeatherForecastCollector extends BaseCollector {
         super('weather_forecast_4days', 15 * 60 * 1000);
         this.targets = [];
         this.noaaGridCache = new Map(); // key: "lat,lon" -> { gridId, gridX, gridY }
+        this.wunderFailedStations = new Set();
     }
 
     sleep(ms) {
@@ -33,6 +34,10 @@ class WeatherForecastCollector extends BaseCollector {
             this.targets = Object.values(rawData).map(s => {
                 try { return JSON.parse(s); } catch (e) { return null; }
             }).filter(c => c && c.fetchData === true);
+            const activeStations = new Set(this.targets.map(target => target.station));
+            for (const station of this.wunderFailedStations) {
+                if (!activeStations.has(station)) this.wunderFailedStations.delete(station);
+            }
             logger.info(`📋 Loaded ${this.targets.length} cities from Redis config.`);
         } catch (e) {
             logger.error(`❌ Load Config Error: ${e.message}`);
@@ -202,61 +207,24 @@ class WeatherForecastCollector extends BaseCollector {
 
     // ==========================================
     // 源 1: Wunderground
-    // 特性: Raw JSON 几乎总是 F，需要根据 target.unit 转换
+    // 保持 calendarDayTemperatureMax/Min 口径；新页面显式请求 F 再转换。
     // ==========================================
     async fetchWunderground(target) {
         if (!target.wunderUrl) return [];
         try {
-            const proxyConfig = await this.getAxiosProxy();
-            const response = await axios.get(target.wunderUrl, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Cache-Control': 'no-cache'
-                },
-                timeout: 15000,
-                proxy: proxyConfig || false
+            const result = await fetchWundergroundForecast(target, {
+                get: axios.get,
+                proxy: await this.getAxiosProxy()
             });
-
-            const $ = cheerio.load(response.data);
-            const scriptContent = $('#app-root-state').html();
-            if (!scriptContent) return [];
-
-            const rawData = JSON.parse(scriptContent);
-            const result = [];
-
-            for (const key in rawData) {
-                const item = rawData[key];
-                if (item?.b && item.b.calendarDayTemperatureMax && item.b.validTimeLocal) {
-                    const dates = item.b.validTimeLocal;
-                    const highs = item.b.calendarDayTemperatureMax; // 这是 F
-                    const lows = item.b.calendarDayTemperatureMin || [];
-
-                    if (Array.isArray(dates) && Array.isArray(highs)) {
-                        for (let i = 0; i < Math.min(dates.length, highs.length); i++) {
-                            const timeStr = dates[i];
-                            let high = highs[i]; // Raw is F
-                            let low = lows[i];
-
-                            if (timeStr && typeof high === 'number') {
-                                // validTimeLocal 形如 "2026-05-14T07:00:00+0900"，
-                                // 必须按 target.tz format，否则跑在 UTC 服务器上日期会漂一天
-                                const dateStr = dayjs(timeStr).tz(target.tz).format('YYYY-MM-DD');
-
-                                if (target.unit === 'C') {
-                                    high = this.fToC(high);
-                                    if (typeof low === 'number') low = this.fToC(low);
-                                }
-
-                                result.push({ date: dateStr, high, low: typeof low === 'number' ? low : null });
-                            }
-                        }
-                        if (result.length > 0) break;
-                    }
-                }
+            if (this.wunderFailedStations.delete(target.station)) {
+                logger.info(`[Wunder] recovered station=${target.station} days=${result.length}`);
             }
             return result;
         } catch (e) {
-            // logger.warn(`[Wunder] Failed ${target.station}: ${e.message}`);
+            this.wunderFailedStations.add(target.station);
+            // One warning per city per 15-minute collection cycle. Never log raw
+            // axios errors/URLs because they can contain proxy or API credentials.
+            logger.warn(`[Wunder] forecast unavailable station=${target.station} reason=${e.code || 'request_failed'}`);
             return [];
         }
     }
