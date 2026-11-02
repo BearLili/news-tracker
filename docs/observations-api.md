@@ -1,6 +1,9 @@
 # Weather Observations — 策略接入文档
 
-策略 agent 消费温度观测数据用，**单文档自包含**。读完即可写订阅代码。
+**2026-11-02 更正：以下是旧字段契约，不能按其中“权威结算”等旧表述用于当前 AWC routine 规则。**
+`settlement` 仍是 TWC/WU 历史值，旧 `metar` 包含 SPECI；它们的行为保留以兼容原有消费者。
+当前规则的独立观测字段和适用边界见 [rule-metar-observations.md](rule-metar-observations.md)。
+接入新策略前必须核对具体市场规则，不能把本文旧源名称等同于最终结算。
 
 > 模块：`src/collectors/weather_observations.js`
 > 数据落地：Redis（本机）

@@ -7,6 +7,8 @@ import BaseCollector from '../core/BaseCollector.js';
 import redis from '../core/redis.js';
 import logger from '../utils/logger.js';
 import WethrPushClient from './wethrPushClient.js';
+import { aggregateRuleMetar, RULE_METAR_MAX_REPORTS } from './weather-rule-metar.js';
+import { WeatherRuleMetarStore } from './weather-rule-metar-store.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -73,6 +75,9 @@ class WeatherObservationsCollector extends BaseCollector {
         this.wethrTargets = [];
         this.wethrBuffer = new Map();
         this.wethrConfigReady = false;
+        this.ruleMetarStore = new WeatherRuleMetarStore(redis, logger);
+        this.lastRuleMetarErrorAt = 0;
+        this.ruleMetarRunning = false;
     }
 
     sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -248,6 +253,8 @@ class WeatherObservationsCollector extends BaseCollector {
 
         const limit = pLimit(this.metarConcurrency);
         const byStation = new Map();
+        // Attached only to this result, never cached across polling cycles.
+        byStation.ruleSnapshots = new Map();
         let failed = 0;
         let retried = 0;
         let skipped = 0;
@@ -285,7 +292,19 @@ class WeatherObservationsCollector extends BaseCollector {
                         },
                         proxy: proxyConfig || false
                     });
+                    if (resp.status === 204) {
+                        for (const station of chunk) byStation.ruleSnapshots.set(station, {
+                            reports: [], complete: true, windowStartMs: nowSec * 1000 - 48 * 3600_000,
+                        });
+                        return;
+                    }
                     if (!Array.isArray(resp.data)) return;
+                    for (const station of chunk) byStation.ruleSnapshots.set(station, {
+                        reports: resp.data.filter(record => record?.icaoId === station).slice(0, RULE_METAR_MAX_REPORTS),
+                        complete: resp.data.length < RULE_METAR_MAX_REPORTS
+                            && resp.data.every(record => chunk.includes(record?.icaoId)),
+                        windowStartMs: nowSec * 1000 - 48 * 3600_000,
+                    });
                     for (const e of resp.data) {
                         const id = e?.icaoId;
                         const t = e?.temp;
@@ -431,6 +450,29 @@ class WeatherObservationsCollector extends BaseCollector {
         return result;
     }
 
+    // Single flight, no queue, no new HTTP request/connection/timer. A slow new
+    // namespace write must not delay the existing observation consumers.
+    async publishRuleMetarSnapshots(snapshots) {
+        if (!snapshots || this.ruleMetarRunning) return;
+        this.ruleMetarRunning = true;
+        try {
+            for (const target of this.targets) {
+                const snapshot = snapshots.get(target.station);
+                if (!snapshot) continue;
+                const today = dayjs().tz(target.tz);
+                await this.ruleMetarStore.commit(aggregateRuleMetar(snapshot.reports, target,
+                    [today.format('YYYY-MM-DD'), today.subtract(1, 'day').format('YYYY-MM-DD')], snapshot));
+            }
+        } catch (error) {
+            if (Date.now() - this.lastRuleMetarErrorAt >= 60_000) {
+                this.lastRuleMetarErrorAt = Date.now();
+                logger.warn(`[RuleMETAR] isolated collection failure error=${error.name}`);
+            }
+        } finally {
+            this.ruleMetarRunning = false;
+        }
+    }
+
     async runMetarTick() {
         if (this.targets.length === 0) return [];
         const stations = this.targets.map(t => t.station);
@@ -444,6 +486,7 @@ class WeatherObservationsCollector extends BaseCollector {
             return [];
         }
 
+        void this.publishRuleMetarSnapshots(byStation.ruleSnapshots);
         const allUpdates = [];
         let activeStations = 0, totalObs = 0;
         for (const target of this.targets) {
