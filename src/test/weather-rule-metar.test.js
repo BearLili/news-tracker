@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import dayjs from 'dayjs';
 import { aggregateRuleMetar, parseRuleMetar, roundRuleTemperature } from '../collectors/weather-rule-metar.js';
 import { WeatherRuleMetarStore } from '../collectors/weather-rule-metar-store.js';
+import { getRuleMetarTargets } from '../collectors/weather-rule-metar-targets.js';
 
 const DATE = '2026-11-01';
 const TARGET = { station: 'KLGA', unit: 'C', tz: 'America/New_York' };
@@ -136,7 +137,7 @@ test('collector isolates slow/failed new writes; original metar updates keep run
     const end = source.indexOf('    // =====================', start);
     const warnings = [];
     const Collector = vm.runInNewContext(`(class { ${source.slice(start, end)} })`, {
-        dayjs, aggregateRuleMetar, Date, logger: { warn: m => warnings.push(m), info() {}, debug() {} },
+        dayjs, aggregateRuleMetar, getRuleMetarTargets, Date, logger: { warn: m => warnings.push(m), info() {}, debug() {} },
     });
     const collector = new Collector();
     collector.targets = [TARGET]; collector.lastRuleMetarErrorAt = 0;
