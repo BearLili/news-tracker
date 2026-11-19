@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { fetchWundergroundForecast } from './wunderground-forecast.js';
+import { aggregateMetNoSeries, encodeOpenMeteoTimezone, parseTodayRuleMetarExtremes } from './forecast-day-reconcile.js';
 import BaseCollector from '../core/BaseCollector.js';
 import logger from '../utils/logger.js';
 import dayjs from 'dayjs';
@@ -236,7 +237,8 @@ class WeatherForecastCollector extends BaseCollector {
     async fetchOpenMeteo(target) {
         try {
             const unitParam = target.unit === 'F' ? 'fahrenheit' : 'celsius';
-            const url = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5&temperature_unit=${unitParam}`;
+            const tzParam = encodeOpenMeteoTimezone(target.tz);
+            const url = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}&daily=temperature_2m_max,temperature_2m_min&timezone=${tzParam}&forecast_days=5&temperature_unit=${unitParam}`;
 
             const response = await axios.get(url, { timeout: 8000 });
             const daily = response.data?.daily;
@@ -268,7 +270,8 @@ class WeatherForecastCollector extends BaseCollector {
         const out = {};
 
         try {
-            const url = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5&temperature_unit=${unitParam}&models=${modelNames.join(',')}`;
+            const tzParam = encodeOpenMeteoTimezone(target.tz);
+            const url = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}&daily=temperature_2m_max,temperature_2m_min&timezone=${tzParam}&forecast_days=5&temperature_unit=${unitParam}&models=${modelNames.join(',')}`;
             const response = await axios.get(url, { timeout: 8000 });
             const daily = response.data?.daily;
             if (!daily?.time) return out;
@@ -311,33 +314,15 @@ class WeatherForecastCollector extends BaseCollector {
             const series = response.data?.properties?.timeseries;
             if (!Array.isArray(series) || series.length === 0) return [];
 
-            const maxByDate = new Map();
-            const minByDate = new Map();
-            for (const point of series) {
-                const iso = point?.time;
-                const tempC = point?.data?.instant?.details?.air_temperature;
-                if (!iso || typeof tempC !== 'number') continue;
-
-                const dateStr = dayjs(iso).tz(target.tz).format('YYYY-MM-DD');
-                const prevMax = maxByDate.get(dateStr);
-                if (prevMax === undefined || tempC > prevMax) maxByDate.set(dateStr, tempC);
-                const prevMin = minByDate.get(dateStr);
-                if (prevMin === undefined || tempC < prevMin) minByDate.set(dateStr, tempC);
+            const nowMs = Date.now();
+            const todayStr = dayjs(nowMs).tz(target.tz).format('YYYY-MM-DD');
+            let ruleMetarHash = null;
+            try {
+                ruleMetarHash = await redis.hgetall(`poly:rule_metar:${target.station}:${todayStr}`);
+            } catch (err) {
+                ruleMetarHash = null;
             }
-
-            const today = dayjs().tz(target.tz).startOf('day');
-            const result = [];
-            for (let i = 0; i < 5; i++) {
-                const d = today.add(i, 'day').format('YYYY-MM-DD');
-                if (!maxByDate.has(d)) continue;
-                let high = maxByDate.get(d);
-                let low = minByDate.get(d);
-                if (target.unit === 'F') { high = this.cToF(high); low = low !== undefined ? this.cToF(low) : null; }
-                else { high = Math.round(high); low = low !== undefined ? Math.round(low) : null; }
-                result.push({ date: d, high, low });
-            }
-
-            return result;
+            return aggregateMetNoSeries(series, target, { nowMs, ruleMetarHash });
         } catch (e) {
             logger.warn(`[MET.NO] Failed ${target.station}: ${e.message}`);
             return [];
@@ -370,7 +355,22 @@ class WeatherForecastCollector extends BaseCollector {
                 logger.debug(`[NOAA] /points failed for ${target.station}, using cached grid`);
             }
 
-            // 并行拉取：实测观测（今天的真实数据）+ hourly 预报（未来）
+            // 优先读取已按 Polymarket 例行 METAR 规则过滤过 SPECI 的 poly:rule_metar；仅缺失时回退 /observations
+            const nowMs = Date.now();
+            const todayStr = dayjs(nowMs).tz(target.tz).format('YYYY-MM-DD');
+            let todayRuleObs = { valid: false, high: null, low: null };
+            try {
+                const ruleHash = await redis.hgetall(`poly:rule_metar:${target.station}:${todayStr}`);
+                todayRuleObs = parseTodayRuleMetarExtremes(ruleHash, {
+                    station: target.station,
+                    date: todayStr,
+                    unit: target.unit,
+                    nowMs,
+                });
+            } catch (err) {
+                todayRuleObs = { valid: false, high: null, low: null };
+            }
+
             const hourlyUrl = `https://api.weather.gov/gridpoints/${gridId}/${gridX},${gridY}/forecast/hourly`;
             const obsUrl = `https://api.weather.gov/stations/${target.station}/observations?limit=500`;
 
@@ -380,18 +380,23 @@ class WeatherForecastCollector extends BaseCollector {
                     timeout: 8000,
                     proxy: proxyConfig || false
                 }),
-                axios.get(obsUrl, {
-                    headers: { 'User-Agent': 'PolyBot_Forecast/1.0' },
-                    timeout: 8000,
-                    proxy: proxyConfig || false
-                })
+                todayRuleObs.valid
+                    ? Promise.resolve(null)
+                    : axios.get(obsUrl, {
+                        headers: { 'User-Agent': 'PolyBot_Forecast/1.0' },
+                        timeout: 8000,
+                        proxy: proxyConfig || false
+                    })
             ]);
 
             const highByDate = new Map();
             const lowByDate = new Map();
 
-            // 1) 实测观测点（覆盖最近 ~2 天，每 5 分钟一条）—— Polymarket 裁决基准
-            if (obsRes.status === 'fulfilled') {
+            if (todayRuleObs.valid) {
+                const toF = v => (target.unit === 'C' ? (v * 9) / 5 + 32 : v);
+                if (todayRuleObs.high != null) highByDate.set(todayStr, toF(todayRuleObs.high));
+                if (todayRuleObs.low != null) lowByDate.set(todayStr, toF(todayRuleObs.low));
+            } else if (obsRes.status === 'fulfilled' && obsRes.value) {
                 const features = obsRes.value.data?.features || [];
                 for (const f of features) {
                     const ts = f?.properties?.timestamp;
