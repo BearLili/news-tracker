@@ -37,6 +37,7 @@ test('evening MET.NO series merges T0 with rule_metar so daytime high and mornin
         high: '16',
         low: '5',
         updated_at: String(NOW_PARIS_EVENING - 60_000),
+        latest_obs_ts: String(Math.floor((NOW_PARIS_EVENING - 30 * 60_000) / 1000)),
     };
     const rows = aggregateMetNoSeries(series, PARIS, {
         nowMs: NOW_PARIS_EVENING,
@@ -89,9 +90,13 @@ test('parseTodayRuleMetarExtremes rejects stale, incomplete or mismatched statio
         high: '16',
         low: '5',
         updated_at: String(NOW_PARIS_EVENING - 60_000),
+        latest_obs_ts: String(Math.floor((NOW_PARIS_EVENING - 30 * 60_000) / 1000)),
     };
     assert.equal(parseTodayRuleMetarExtremes(base, { ...PARIS, date: '2026-11-19', nowMs: NOW_PARIS_EVENING }).valid, true);
     assert.equal(parseTodayRuleMetarExtremes({ ...base, status: 'incomplete' }, { ...PARIS, date: '2026-11-19', nowMs: NOW_PARIS_EVENING }).valid, false);
     assert.equal(parseTodayRuleMetarExtremes({ ...base, station: 'EGLC' }, { ...PARIS, date: '2026-11-19', nowMs: NOW_PARIS_EVENING }).valid, false);
     assert.equal(parseTodayRuleMetarExtremes({ ...base, updated_at: String(NOW_PARIS_EVENING - 40 * 60_000) }, { ...PARIS, date: '2026-11-19', nowMs: NOW_PARIS_EVENING }).valid, false);
+    assert.equal(parseTodayRuleMetarExtremes({ ...base, latest_obs_ts: '' }, { ...PARIS, date: '2026-11-19', nowMs: NOW_PARIS_EVENING }).valid, false);
+    assert.equal(parseTodayRuleMetarExtremes({ ...base, latest_obs_ts: String(Math.floor((NOW_PARIS_EVENING - 3 * 60 * 60_000) / 1000)) }, { ...PARIS, date: '2026-11-19', nowMs: NOW_PARIS_EVENING }).valid, false);
+    assert.equal(parseTodayRuleMetarExtremes({ ...base, latest_obs_ts: String(Math.floor((NOW_PARIS_EVENING + 10 * 60_000) / 1000)) }, { ...PARIS, date: '2026-11-19', nowMs: NOW_PARIS_EVENING }).valid, false);
 });

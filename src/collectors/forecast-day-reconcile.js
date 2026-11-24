@@ -7,6 +7,15 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 const MAX_RULE_METAR_AGE_MS = 30 * 60 * 1000;
+const MAX_RULE_METAR_OBS_AGE_MS = 2 * 60 * 60 * 1000;
+const MAX_RULE_METAR_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
+function normalizeTimestampMs(raw) {
+    if (raw == null || raw === '') return 0;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    return value < 1e12 ? value * 1000 : value;
+}
 
 /**
  * Resolve the explicit Open-Meteo timezone query value from city configuration.
@@ -36,9 +45,14 @@ export function parseTodayRuleMetarExtremes(hash, { station, date, unit, nowMs =
         || String(hash.unit || '').toUpperCase() !== String(unit || '').toUpperCase()) {
         return { valid: false, high: null, low: null };
     }
-    const updatedRaw = Number(hash.updated_at);
-    const updatedAtMs = updatedRaw > 0 && updatedRaw < 1e12 ? updatedRaw * 1000 : updatedRaw;
-    if (!Number.isFinite(updatedAtMs) || updatedAtMs <= 0 || nowMs - updatedAtMs > MAX_RULE_METAR_AGE_MS) {
+    const updatedAtMs = normalizeTimestampMs(hash.updated_at);
+    if (!updatedAtMs || updatedAtMs > nowMs + MAX_RULE_METAR_FUTURE_SKEW_MS
+        || nowMs - updatedAtMs > MAX_RULE_METAR_AGE_MS) {
+        return { valid: false, high: null, low: null };
+    }
+    const latestObsTsMs = normalizeTimestampMs(hash.latest_obs_ts);
+    if (!latestObsTsMs || latestObsTsMs > nowMs + MAX_RULE_METAR_FUTURE_SKEW_MS
+        || nowMs - latestObsTsMs > MAX_RULE_METAR_OBS_AGE_MS) {
         return { valid: false, high: null, low: null };
     }
     const high = hash.high !== '' && hash.high != null && Number.isFinite(Number(hash.high)) ? Number(hash.high) : null;
